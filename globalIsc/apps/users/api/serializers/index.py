@@ -126,24 +126,34 @@ class UserSerializer(serializers.ModelSerializer):
         )
 
     def get_profile(self, obj):
-        profile = (
-            obj.company_profiles
-            .select_related("empresa", "role")
-            .filter(status__in=[
-                UserCompanyProfile.Status.PENDING,
-                UserCompanyProfile.Status.ACTIVE,
-                UserCompanyProfile.Status.READ_ONLY,
-                UserCompanyProfile.Status.BLOCKED,
-            ])
-            .order_by("-is_company_admin", "id")
-            .first()
-        )
+        profiles = obj.company_profiles.select_related("empresa", "role")
+        # The editable role must belong to the user's current company.  A user
+        # can retain historical profiles (including a removed profile after a
+        # transfer), and selecting an arbitrary active one made the editor and
+        # reinvitation send the company/role of an old membership.
+        profile = profiles.filter(empresa_id=obj.empresa_id).order_by("-updated_at", "-id").first()
+        if profile is None:
+            profile = (
+                profiles
+                .filter(status__in=[
+                    UserCompanyProfile.Status.PENDING,
+                    UserCompanyProfile.Status.ACTIVE,
+                    UserCompanyProfile.Status.READ_ONLY,
+                    UserCompanyProfile.Status.BLOCKED,
+                ])
+                .order_by("-is_company_admin", "-updated_at", "-id")
+                .first()
+            )
         if not profile:
             return None
         return {
             "id": profile.id,
+            # Keep both the explicit *_id values and the conventional relation
+            # keys.  Browser clients use the latter when editing a profile.
+            "empresa": profile.empresa_id,
             "empresa_id": profile.empresa_id,
             "empresa_nombre": getattr(profile.empresa, "nombre", None),
+            "role": profile.role_id,
             "role_id": profile.role_id,
             "role_name": getattr(profile.role, "name", None),
             "role_code": getattr(profile.role, "code", None),
@@ -458,16 +468,19 @@ class UserInvitationAcceptSerializer(serializers.Serializer):
     last_name = serializers.CharField(max_length=150)
     phone = serializers.CharField(max_length=20, required=False, allow_blank=True)
     avatar = serializers.CharField(max_length=255, required=False, allow_blank=True, allow_null=True)
-    password = serializers.CharField(write_only=True)
-    password2 = serializers.CharField(write_only=True)
+    password = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    password2 = serializers.CharField(write_only=True, required=False, allow_blank=True)
 
     def validate(self, attrs):
-        if attrs["password"] != attrs["password2"]:
+        password = attrs.get("password", "")
+        password2 = attrs.get("password2", "")
+        if bool(password) != bool(password2) or password != password2:
             raise serializers.ValidationError({"password2": "Las contrasenas no coinciden."})
-        try:
-            validate_password(attrs["password"])
-        except exceptions.ValidationError as exc:
-            raise serializers.ValidationError({"password": list(exc.messages)})
+        if password:
+            try:
+                validate_password(password)
+            except exceptions.ValidationError as exc:
+                raise serializers.ValidationError({"password": list(exc.messages)})
         return attrs
 
 
