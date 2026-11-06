@@ -68,6 +68,8 @@ backups/
 /globalIsc/apps/media/firmas/
 /globalIsc/apps/media/firmas_usuarios/
 /globalIsc/apps/media/reportes/
+globalIsc/outputs/
+/pdf-qa/
 
 # Archivos de coverage
 .coverage
