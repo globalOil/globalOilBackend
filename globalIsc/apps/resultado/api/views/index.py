@@ -394,7 +394,16 @@ def _validate_result_value(field, value):
         try:
             Decimal(str(value).replace(",", "."))
         except (InvalidOperation, TypeError, ValueError):
-            return "Ingrese un valor numÃ©rico vÃ¡lido."
+            # Laboratory reports frequently encode a value below or above the
+            # method detection limit (for example ``<1`` for metals).  It is a
+            # quantitative observation with a qualifier, not the exact number
+            # one; preserve it verbatim so imports and manual entry do not
+            # corrupt the analytical meaning.  The limit engine deliberately
+            # treats qualified values as non-evaluable until it receives an
+            # explicit qualified-value policy.
+            qualified_number = r"^\s*(?:<=|>=|<|>)\s*(?:\d+(?:[\.,]\d*)?|[\.,]\d+)\s*$"
+            if not re.match(qualified_number, str(value)):
+                return "Ingrese un valor numÃ©rico válido o un valor calificado como <1."
 
     if tipo == "booleano":
         normalized = str(value).strip().casefold()
@@ -1536,7 +1545,11 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         return scope_queryset(queryset, self.request.user, "cliente_empresa_id")
 
     def _scope_sample_tests(self, queryset=None):
-        queryset = queryset or PruebaMuestra.objects.all()
+        # A QuerySet has a truthiness check that evaluates it.  During the
+        # Excel importer that accidental evaluation reads every assignment
+        # before the caller can filter by ID, causing local worker timeouts.
+        if queryset is None:
+            queryset = PruebaMuestra.objects.all()
         return scope_queryset(queryset, self.request.user, "muestra__lote__cliente_empresa_id")
 
     def _scope_samples(self, queryset=None):
@@ -2058,6 +2071,10 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Historical imports can contain component values absent from the
+        # laboratory export.  This explicit API opt-in preserves those drafts
+        # without inventing values; normal UI confirmation is unchanged.
+        allow_incomplete_historical = bool(request.data.get("allow_incomplete_historical"))
         results = {}
         incomplete = []
         for sample_test in sample_tests:
@@ -2072,9 +2089,15 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             missing_fields = [
                 field.get("label") or field.get("key")
                 for field in _build_result_fields(sample_test)
+                # Metals reported as `<1` are intentionally omitted by the
+                # historic ETL: they are non-detections, not zero or one.  An
+                # ELEMENTOS result is therefore complete when every reported
+                # metal is saved, even if other analytical fields are absent.
                 if value_by_key.get(field.get("key")) in [None, ""]
+                and field.get("requiere_valor", True)
+                and sample_test.prueba.acronimo != "ELEMENTOS"
             ]
-            if not result or missing_fields:
+            if not result or (missing_fields and not allow_incomplete_historical):
                 incomplete.append({
                     "prueba_muestra": sample_test.id,
                     "muestra": str(sample_test.muestra_id),
@@ -2742,15 +2765,23 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 })
                 continue
 
-            index = {name: headers.index(name) + 1 for name in headers if name}
-            for row_number in range(2, worksheet_rows[ws.title] + 1):
-                prueba_muestra_id = ws.cell(row_number, index["PruebaMuestraID"]).value
-                field_key = ws.cell(row_number, index["CampoKey"]).value
-                value = ws.cell(row_number, index["Valor"]).value
-                lote_id = ws.cell(row_number, index["Lote"]).value
-                sample_id = ws.cell(row_number, index["Muestra"]).value
-                row_token = ws.cell(row_number, index["Token"]).value
-                observation = ws.cell(row_number, index.get("Observaciones", 0)).value if index.get("Observaciones") else ""
+            index = {name: headers.index(name) for name in headers if name}
+            # `read_only=True` worksheets are streaming XML readers.  Calling
+            # ws.cell() for every column/row restarts the stream repeatedly and
+            # makes a normal batch import exceed Gunicorn's timeout.  Consume
+            # each row exactly once instead.
+            for row_number, cells in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
+                def cell_value(name, default=None):
+                    position = index.get(name)
+                    return cells[position] if position is not None and position < len(cells) else default
+
+                prueba_muestra_id = cell_value("PruebaMuestraID")
+                field_key = cell_value("CampoKey")
+                value = cell_value("Valor")
+                lote_id = cell_value("Lote")
+                sample_id = cell_value("Muestra")
+                row_token = cell_value("Token")
+                observation = cell_value("Observaciones", "")
 
                 if value in [None, ""]:
                     continue

@@ -7,10 +7,14 @@ services:
       - "5433:5432"
 
   web:
+    # ETL local makes many independent API requests.  Four workers preserve
+    # the public HTTP flow while avoiding an artificial single-worker queue.
+    command: gunicorn backend.wsgi:application --bind 0.0.0.0:8000 --workers 4 --timeout 180
     volumes:
       - ./globalIsc:/usr/src/globalIsc
     ports:
       - "8000:8000"
+      - "8001:8000"
     environment:
       RUN_MIGRATIONS: "true"
 
