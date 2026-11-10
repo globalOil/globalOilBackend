@@ -43,7 +43,7 @@ class HistoricEtlTest(unittest.TestCase):
             knowledge_book.active.append(["Ag", "1"])
             knowledge_book.save(knowledge)
 
-            manifest = make_artifacts(reports, knowledge, output, replace=False)
+            manifest = make_artifacts(reports, knowledge, output, replace=False, client_scope="all")
 
             self.assertEqual(manifest["controls"]["records"], 1)
             self.assertEqual(manifest["controls"]["unique_oa"], 1)
@@ -82,7 +82,7 @@ class HistoricEtlTest(unittest.TestCase):
             knowledge_book.active.append(["Metal", "Límite"])
             knowledge_book.save(knowledge)
 
-            manifest = make_artifacts(reports, knowledge, output, replace=False)
+            manifest = make_artifacts(reports, knowledge, output, replace=False, client_scope="all")
 
             self.assertEqual(manifest["controls"]["records"], 1)
 

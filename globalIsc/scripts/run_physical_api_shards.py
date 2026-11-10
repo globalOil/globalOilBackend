@@ -4,6 +4,7 @@ import getpass
 import os
 import subprocess
 import sys
+import argparse
 from pathlib import Path
 
 
@@ -12,11 +13,19 @@ ARTIFACTS = SCRIPT_DIR.parent / "outputs" / "migracion_historica_global_oil"
 
 
 def main():
-    password = getpass.getpass("Contraseña del administrador local: ")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--password-env",
+        default="DATAIA_IMPORT_PASSWORD",
+        help="Nombre de la variable de entorno que contiene la contraseña.",
+    )
+    args = parser.parse_args()
+
+    password = os.environ.get(args.password_env) or getpass.getpass("Contraseña del administrador local: ")
     if not password:
         raise SystemExit("No se recibió contraseña.")
     environment = os.environ.copy()
-    environment["DATAIA_IMPORT_PASSWORD"] = password
+    environment[args.password_env] = password
     logs = ARTIFACTS / "reports" / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     children = []
@@ -29,7 +38,7 @@ def main():
             "--report-file", f"carga_api_resultados_fisicos_forms_shard{shard}.json",
             "--base-url", "http://localhost:8001",
             "--email", "admin@globaloil.local",
-            "--password-env", "DATAIA_IMPORT_PASSWORD",
+            "--password-env", args.password_env,
             "--apply", "--resume",
             "--batch-shard-count", "4", "--batch-shard-index", str(shard),
         ]
