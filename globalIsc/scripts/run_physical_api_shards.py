@@ -19,6 +19,11 @@ def main():
         default="DATAIA_IMPORT_PASSWORD",
         help="Nombre de la variable de entorno que contiene la contraseña.",
     )
+    parser.add_argument(
+        "--base-url",
+        default=os.environ.get("GLOBAL_OIL_API_BASE_URL", "http://localhost:8001"),
+        help="URL de la API; en el VPS use http://localhost:8000 dentro del contenedor web.",
+    )
     args = parser.parse_args()
 
     password = os.environ.get(args.password_env) or getpass.getpass("Contraseña del administrador local: ")
@@ -36,7 +41,7 @@ def main():
             "--sample-test-map", str(ARTIFACTS / "staging" / "oa_pruebas_muestra.json"),
             "--payload-file", "api_result_payloads_physical.jsonl",
             "--report-file", f"carga_api_resultados_fisicos_forms_shard{shard}.json",
-            "--base-url", "http://localhost:8001",
+            "--base-url", args.base_url,
             "--email", "admin@globaloil.local",
             "--password-env", args.password_env,
             "--apply", "--resume",
