@@ -18,6 +18,48 @@ BRANDS = (
 METALS = ("Ag", "Al", "B", "Ba", "Ca", "Cd", "Cr", "Cu", "Fe", "K", "Li", "Mg", "Mn", "Mo", "Na", "Ni", "P", "Pb", "Sb", "Si", "Sn", "Ti", "V", "Zn")
 FOAM = {"Espuma Seq I": ("Secuencia I", "EI", "FI"), "Espuma Seq II": ("Secuencia II", "EII", "FII"), "Espuma Seq III": ("Secuencia III", "EIII", "FIII")}
 
+# Approved Mineros Aluvial sampling-point homologation.  The legacy OA files
+# use several names for the same generating-unit components.  The sampling
+# code (PLACA) is the stable physical identity, so it selects both the visible
+# point and its canonical parent machine.  Source aliases are retained in the
+# output for auditability.
+MINEROS_SAMPLING_POINTS = {
+    "100015995": ("SISTEMA HIDRÁULICO ALJIBES", "UNIDAD DE POTENCIA HIDRÁULICA ALJIBES"),
+    "100019143": ("COMPUERTA RADIAL", "UNID POTENCIA HIDRÁ. COMPUERTA RADIAL"),
+    "100019128": ("UNIDAD DE GENERACIÓN 1", "CHUMACERA DE TURBINA LADO NORTE"),
+    "100018820": ("UNIDAD DE GENERACIÓN 1", "CHUMACERA DE TURBINA LADO SUR"),
+    "100019127": ("UNIDAD DE GENERACIÓN 1", "CHUMACERA GENERADOR LADO NORTE"),
+    "100019126": ("UNIDAD DE GENERACIÓN 1", "CHUMACERA GENERADOR LADO SUR"),
+    "100018623": ("UNIDAD DE GENERACIÓN 1", "HPU - CONTROL DE VELOCIDAD"),
+    "100021915": ("UNIDAD DE GENERACIÓN 1", "HPU – VÁLVULA DE ADMISIÓN"),
+    "100019132": ("UNIDAD DE GENERACIÓN 2", "CHUMACERA DE TURBINA LADO NORTE"),
+    "100019131": ("UNIDAD DE GENERACIÓN 2", "CHUMACERA DE TURBINA LADO SUR"),
+    "100019130": ("UNIDAD DE GENERACIÓN 2", "CHUMACERA GENERADOR LADO NORTE"),
+    "100019129": ("UNIDAD DE GENERACIÓN 2", "CHUMACERA GENERADOR LADO SUR"),
+    "100018624": ("UNIDAD DE GENERACIÓN 2", "HPU - CONTROL DE VELOCIDAD"),
+    "100016002": ("UNIDAD DE GENERACIÓN 2", "HPU – VÁLVULA DE ADMISIÓN"),
+    "100019133": ("UNIDAD DE GENERACIÓN 3", "CHUMACERA DE TURBINA LADO NORTE"),
+    "100019134": ("UNIDAD DE GENERACIÓN 3", "CHUMACERA DE TURBINA LADO SUR"),
+    "100018625": ("UNIDAD DE GENERACIÓN 3", "HPU - CONTROL DE VELOCIDAD"),
+    "100015994": ("UNIDAD DE GENERACIÓN 3", "HPU – VÁLVULA DE ADMISIÓN"),
+    "100018621": ("UNIDAD DE GENERACIÓN 4", "HPU – CONTROL DE VELOCIDAD"),
+    "100019135": ("UNIDAD DE GENERACIÓN 4", "CHUMACERA DE TURBINA LADO NORTE"),
+    "100019136": ("UNIDAD DE GENERACIÓN 4", "CHUMACERA DE TURBINA LADO SUR"),
+    "100016003": ("UNIDAD DE GENERACIÓN 4", "HPU – VÁLVULA DE ADMISIÓN"),
+    "100019138": ("UNIDAD DE GENERACIÓN 5", "COJINETE EMPUJE TURBINA"),
+    "100019137": ("UNIDAD DE GENERACIÓN 5", "COJINETE GUÍA DE TURBINA"),
+    "100018622": ("UNIDAD DE GENERACIÓN 5", "HPU - CONTROL DE VELOCIDAD"),
+    "100016001": ("UNIDAD DE GENERACIÓN 5", "UNIDAD DE LUBRICACIÓN DEL GENERADOR"),
+    "100018822": ("UNIDAD DE GENERACIÓN 6", "COJINETE GUÍA DE TURBINA"),
+    "100018626": ("UNIDAD DE GENERACIÓN 6", "SISTEMA HPU"),
+    "100019140": ("UNIDAD DE GENERACIÓN 6", "UNID LUBRICACIÓN COJINETES EMPUJE TURBINA"),
+    "100019139": ("UNIDAD DE GENERACIÓN 6", "UNID. LUBRICACIÓN COJINETES GENERADOR"),
+    "100022240": ("UNIDAD DE GENERACIÓN 7", "COJINETE GUÍA DE TURBINA"),
+    "100022241": ("UNIDAD DE GENERACIÓN 7", "SISTEMA HPU"),
+    "100019142": ("UNIDAD DE GENERACIÓN 7", "UNID LUBRICACIÓN COJINETES EMPUJE TURBINA"),
+    "100019141": ("UNIDAD DE GENERACIÓN 7", "UNID. LUBRICACIÓN COJINETES GENERADOR"),
+}
+
 
 def norm(value):
     return re.sub(r"\s*-\s*", "-", " ".join(str(value or "").split())).strip()
@@ -97,6 +139,13 @@ def split_machine_and_point(equipment):
     return machine, point
 
 
+def canonical_sampling_identity(company, plate, machine, point_name):
+    """Return the approved Mineros identity when its sampling code is known."""
+    if "MINEROS ALUVIAL" not in norm(company).upper():
+        return machine, point_name
+    return MINEROS_SAMPLING_POINTS.get(plate, (machine, point_name))
+
+
 def write_csv(path, rows, fields):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8-sig") as target:
@@ -122,19 +171,23 @@ def build_point_rows(rows):
     points = {}
     for row in rows:
         company, equipment, lubricant, system = (norm(row.get(key)) for key in ("CLIENTE", "EQUIPO", "LUBRICANTE", "Tipo"))
-        machine, point_name = split_machine_and_point(equipment)
-        if not company or not machine:
+        source_machine, source_point_name = split_machine_and_point(equipment)
+        machine, point_name = source_machine, source_point_name
+        if not company or not source_machine:
             continue
         plate = plate_code(row.get("PLACA"))
+        machine, point_name = canonical_sampling_identity(company, plate, machine, point_name)
         key = (company, machine, "placa", plate) if has_source_plate(plate) else (company, machine, "nombre", point_name)
         point = points.setdefault(key, {
             "empresa_origen": company, "maquina_origen": machine,
-            "nombres_origen": [], "lubricantes_historicos": set(),
+            "maquinas_origen": [], "nombres_origen": [], "lubricantes_historicos": set(),
             "tipos_historicos": set(), "placas_historicas": set(),
             "nombre_punto": point_name,
         })
-        if point_name not in point["nombres_origen"]:
-            point["nombres_origen"].append(point_name)
+        if source_machine not in point["maquinas_origen"]:
+            point["maquinas_origen"].append(source_machine)
+        if source_point_name not in point["nombres_origen"]:
+            point["nombres_origen"].append(source_point_name)
         if plate:
             point["placas_historicas"].add(plate)
         if lubricant:
@@ -145,6 +198,7 @@ def build_point_rows(rows):
     point_rows = []
     for point in points.values():
         plates = sorted(point["placas_historicas"], key=str.casefold)
+        point["maquinas_origen"] = " | ".join(point["maquinas_origen"])
         point["punto_origen"] = " | ".join(point.pop("nombres_origen"))
         point["placas_historicas"] = " | ".join(plates)
         point["lubricantes_historicos"] = " | ".join(sorted(point["lubricantes_historicos"], key=str.casefold))
@@ -199,7 +253,7 @@ def main():
                     reference = norm(re.sub(pattern, "", lubricant, flags=re.I)).strip(" -/") or lubricant
                     break
             lubricants[lubricant] = {"origen": lubricant, "marca": brand, "referencia": reference, "estado": status}
-    write_csv(args.artifacts / "homologacion" / "puntos_medicion.csv", point_rows, ["empresa_origen", "maquina_origen", "punto_origen", "lubricantes_historicos", "tipos_historicos", "placas_historicas", "codigo_punto", "nombre_punto", "estado"])
+    write_csv(args.artifacts / "homologacion" / "puntos_medicion.csv", point_rows, ["empresa_origen", "maquina_origen", "maquinas_origen", "punto_origen", "lubricantes_historicos", "tipos_historicos", "placas_historicas", "codigo_punto", "nombre_punto", "estado"])
     lubricant_rows = sorted(lubricants.values(), key=lambda item: item["origen"].casefold())
     write_csv(args.artifacts / "homologacion" / "lubricantes_dominio.csv", lubricant_rows, ["origen", "marca", "referencia", "estado"])
     layout = [{"prueba": "ELEMENTOS", "resultado": metal, "campo": metal, "unidad": "ppm", "origen": metal} for metal in METALS]

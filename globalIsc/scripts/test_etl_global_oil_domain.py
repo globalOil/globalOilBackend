@@ -50,6 +50,23 @@ class PointHomologationTest(unittest.TestCase):
         points = build_point_rows(rows)
         self.assertEqual({point["nombre_punto"] for point in points}, {"MOTOR · 100026495", "MOTOR · N-186"})
 
+    def test_mineros_approved_codes_consolidate_to_canonical_machine_and_point(self):
+        rows = [
+            {"CLIENTE": "MINEROS ALUVIAL S.A.S.", "EQUIPO": "CHUMACERA DE TURBINA LADO NORTE UG1", "PLACA": "100019128", "LUBRICANTE": "ISO 46", "Tipo": "Hidráulico"},
+            {"CLIENTE": "MINEROS ALUVIAL S.A.S.", "EQUIPO": "UNIDAD DE GENERACIÓN 1-CHUMACERA TURBINA LADO NORTE", "PLACA": 100019128.0, "LUBRICANTE": "ISO 46", "Tipo": "Hidráulico"},
+            {"CLIENTE": "MINEROS ALUVIAL S.A.S.", "EQUIPO": "SISTEMA HPU UG7", "PLACA": "100022241", "LUBRICANTE": "ISO 46", "Tipo": "Hidráulico"},
+        ]
+
+        points = build_point_rows(rows)
+
+        self.assertEqual(len(points), 2)
+        by_code = {point["codigo_punto"]: point for point in points}
+        self.assertEqual(by_code["100019128"]["maquina_origen"], "UNIDAD DE GENERACIÓN 1")
+        self.assertEqual(by_code["100019128"]["nombre_punto"], "CHUMACERA DE TURBINA LADO NORTE")
+        self.assertEqual(by_code["100019128"]["maquinas_origen"], "CHUMACERA DE TURBINA LADO NORTE UG1 | UNIDAD DE GENERACIÓN 1-CHUMACERA TURBINA LADO NORTE")
+        self.assertEqual(by_code["100022241"]["maquina_origen"], "UNIDAD DE GENERACIÓN 7")
+        self.assertEqual(by_code["100022241"]["nombre_punto"], "SISTEMA HPU")
+
 
 if __name__ == "__main__":
     unittest.main()

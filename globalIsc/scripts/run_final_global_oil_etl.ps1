@@ -55,6 +55,26 @@ function Invoke-EtlPython {
     }
 }
 
+function Invoke-EtlManage {
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
+    Push-Location $backendRoot
+    try {
+        $composeArguments = @("compose", "-p", "globaloil-local", "--env-file", ".env.local", "-f", "docker-compose.prod.yml", "-f", "docker-compose.local.yml", "exec", "-T")
+        # `docker compose exec` does not inherit arbitrary host variables. Pass
+        # the bootstrap secret by name into this one process without printing
+        # its value or persisting it in a compose file.
+        if (Test-Path Env:ETL_BOOTSTRAP_PASSWORD) {
+            $composeArguments += @("-e", "ETL_BOOTSTRAP_PASSWORD")
+        }
+        $composeArguments += @("web", "python", "manage.py") + $Arguments
+        & docker @composeArguments
+        if ($LASTEXITCODE -ne 0) {
+            throw "Falló: python manage.py $($Arguments -join ' ')"
+        }
+    }
+    finally { Pop-Location }
+}
+
 if ($ResetLocal -and -not $Apply) {
     throw "-ResetLocal exige -Apply. La corrida en seco nunca borra la base local."
 }
@@ -71,6 +91,30 @@ try {
             docker compose -p globaloil-local --env-file .env.local -f docker-compose.prod.yml -f docker-compose.local.yml exec -T web python manage.py reset_to_security_baseline --yes
             if ($LASTEXITCODE -ne 0) { throw "Falló el reinicio local; la ETL no continuará." }
         } finally { Pop-Location }
+    }
+
+    # First applied step: establish the internal tenant, Mineros Aluvial and
+    # their four operational accounts before loading any business records.
+    # The password is supplied through an environment variable so it is never
+    # printed in the command line or stored in the repository.
+    if ($Apply) {
+        $previousBootstrapPassword = $env:ETL_BOOTSTRAP_PASSWORD
+        try {
+            $env:ETL_BOOTSTRAP_PASSWORD = $Password
+            $bootstrapArguments = @("bootstrap_globaloil_etl_accounts")
+            # A local reset intentionally establishes known initial
+            # credentials again. Ordinary reruns preserve user passwords.
+            if ($ResetLocal) { $bootstrapArguments += "--reset-passwords" }
+            Invoke-EtlManage @bootstrapArguments
+        }
+        finally {
+            if ($null -eq $previousBootstrapPassword) {
+                Remove-Item Env:ETL_BOOTSTRAP_PASSWORD -ErrorAction SilentlyContinue
+            }
+            else {
+                $env:ETL_BOOTSTRAP_PASSWORD = $previousBootstrapPassword
+            }
+        }
     }
 
     $reportArguments = @()

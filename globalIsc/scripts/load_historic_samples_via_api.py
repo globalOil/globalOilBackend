@@ -13,7 +13,13 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from etl_global_oil_domain import has_source_plate, norm, plate_code, split_machine_and_point
+from etl_global_oil_domain import (
+    canonical_sampling_identity,
+    has_source_plate,
+    norm,
+    plate_code,
+    split_machine_and_point,
+)
 from load_global_oil_via_api import Api
 
 
@@ -218,7 +224,14 @@ def main():
     company_cache, machine_cache, point_cache, audit = {}, {}, {}, list(existing.values())
 
     def point_for(row):
-        company = norm(row.get("CLIENTE")); machine, point = split_machine_and_point(norm(row.get("EQUIPO")))
+        company = norm(row.get("CLIENTE"))
+        source_machine, source_point = split_machine_and_point(norm(row.get("EQUIPO")))
+        source_plate = plate_code(row.get("PLACA"))
+        # The asset loader uses the approved code-to-machine homologation.
+        # Resolve samples through that exact same identity, otherwise a legacy
+        # equipment name would look for a machine that intentionally no longer
+        # exists after duplicate consolidation.
+        machine, point = canonical_sampling_identity(company, source_plate, source_machine, source_point)
         company_id = company_cache.get(company)
         if company_id is None:
             matches = [item for item in api.get("companies/buscar/", {"nombre": company}) if norm(item.get("nombre")) == company]
@@ -230,7 +243,6 @@ def main():
             matches = [item for item in api.get("machines/", {"empresa": company_id, "search": machine}) if norm(item.get("nombre")) == machine]
             if not matches: raise RuntimeError(f"Máquina inexistente en API: {company} / {machine}")
             machine_id = machine_cache[machine_key] = matches[0]["id"]
-        source_plate = plate_code(row.get("PLACA"))
         identity = (company, machine, "placa", source_plate) if has_source_plate(source_plate) else (company, machine, "nombre", point)
         point_spec = point_specs.get(identity)
         if not point_spec:
