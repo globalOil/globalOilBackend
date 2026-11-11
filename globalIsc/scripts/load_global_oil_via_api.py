@@ -3,6 +3,7 @@
 import argparse
 import csv
 import json
+import os
 import time
 from pathlib import Path
 import requests
@@ -10,11 +11,24 @@ import requests
 
 class Api:
     def __init__(self, base_url, email, password):
-        self.session = requests.Session(); self.base_url = base_url.rstrip("/")
+        # Production containers cannot always reach their own public IP.  An
+        # ETL can therefore connect to the nginx service internally while it
+        # keeps the public HTTPS host for Django's Host/CSRF validation.  The
+        # overrides are deliberately opt-in; local behaviour remains exactly
+        # the same.
+        self.public_base_url = os.environ.get("GLOBAL_OIL_API_PUBLIC_URL", base_url).rstrip("/")
+        self.base_url = os.environ.get("GLOBAL_OIL_API_CONNECT_URL", self.public_base_url).rstrip("/")
+        self.session = requests.Session()
+        host_header = os.environ.get("GLOBAL_OIL_API_HOST_HEADER", "").strip()
+        if host_header:
+            self.session.headers["Host"] = host_header
+        self.verify_tls = os.environ.get("GLOBAL_OIL_API_INSECURE_TLS", "").lower() not in {"1", "true", "yes"}
+        if not self.verify_tls:
+            requests.packages.urllib3.disable_warnings()
         csrf = self._request("get", "/users/csrf/")
         csrf.raise_for_status()
         token = self.session.cookies.get("csrftoken")
-        response = self._request("post", "/users/login/", json={"email": email, "password": password}, headers={"X-CSRFToken": token or "", "Referer": self.base_url})
+        response = self._request("post", "/users/login/", json={"email": email, "password": password}, headers={"X-CSRFToken": token or "", "Referer": self.public_base_url})
         response.raise_for_status()
     def _request(self, method, path, **kwargs):
         """Retry transient local API/Redis failures without duplicating writes."""
@@ -22,7 +36,7 @@ class Api:
         last_error = None
         for attempt in range(5):
             try:
-                response = self.session.request(method, url, timeout=90, **kwargs)
+                response = self.session.request(method, url, timeout=90, verify=self.verify_tls, **kwargs)
                 if response.status_code < 500:
                     return response
                 last_error = RuntimeError(f"HTTP {response.status_code}: {response.text[:500]}")
@@ -32,7 +46,7 @@ class Api:
         raise RuntimeError(f"API {method.upper()} {path} no respondió tras reintentos: {last_error}")
     def post(self, path, payload):
         token = self.session.cookies.get("csrftoken")
-        response = self._request("post", path, json=payload, headers={"X-CSRFToken": token or "", "Referer": self.base_url})
+        response = self._request("post", path, json=payload, headers={"X-CSRFToken": token or "", "Referer": self.public_base_url})
         if not response.ok:
             raise RuntimeError(f"API POST {path} ({response.status_code}): {response.text}")
         return response.json()
@@ -41,7 +55,7 @@ class Api:
         response = self._request(
             "post", path,
             files={field_name: (file_name, content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-            headers={"X-CSRFToken": token or "", "Referer": self.base_url},
+            headers={"X-CSRFToken": token or "", "Referer": self.public_base_url},
         )
         if not response.ok:
             raise RuntimeError(f"API POST {path} ({response.status_code}): {response.text}")
