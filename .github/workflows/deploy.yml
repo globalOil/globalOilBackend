@@ -37,7 +37,7 @@ jobs:
             for attempt in $(seq 1 20); do
               if docker compose -p globaloil --env-file .env \
                 -f docker-compose.prod.yml -f docker-compose.vps.yml \
-                exec -T web python -c "import urllib.request; request=urllib.request.Request('http://127.0.0.1:8000/api/health/', headers={'Host':'muestraslubricantesglobal.com'}); assert urllib.request.urlopen(request, timeout=5).status == 200"; then
+                exec -T web python -c "import urllib.request; request=urllib.request.Request('http://127.0.0.1:8000/api/health/', headers={'Host':'muestraslubricantesglobal.com', 'X-Forwarded-Proto':'https'}); assert urllib.request.urlopen(request, timeout=5).status == 200"; then
                 exit 0
               fi
               sleep 3
