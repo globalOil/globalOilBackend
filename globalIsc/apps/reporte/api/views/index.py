@@ -32,6 +32,7 @@ from permissions import ActionPermissionMixin, DenyReadOnlyWrite, HasSecurityPer
 
 from apps.muestras.api.models.muestras.index import Muestra
 from apps.muestras.api.models.loteMuestras.index import LoteMuestras
+from apps.activesTree.api.models.index import AsignacionPuntoMuestreo
 from apps.reporte.api.models.index import Reporte, ReporteEnvio
 from apps.reporte.api.serializers.index import (
     CreateReporteSerializer,
@@ -612,7 +613,14 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         Prefetch(
             "envios",
             queryset=ReporteEnvio.objects.select_related("enviado_por", "destinatario_usuario"),
-        )
+        ),
+        # A report belongs to one sample.  Keep its active measurement point
+        # available in the lightweight library response without an N+1 query.
+        Prefetch(
+            "muestra__asignaciones_punto_muestreo",
+            queryset=AsignacionPuntoMuestreo.objects.filter(activa=True).select_related("punto_muestreo"),
+            to_attr="active_point_assignments",
+        ),
     )
 
     def list(self, request, *args, **kwargs):
@@ -680,6 +688,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             .values(
                 "muestra__asignaciones_punto_muestreo__punto_muestreo_id",
                 "muestra__asignaciones_punto_muestreo__punto_muestreo__nombre",
+                "muestra__asignaciones_punto_muestreo__punto_muestreo__codigo",
                 "muestra__asignaciones_punto_muestreo__punto_muestreo__maquina_id",
             )
             .distinct()
@@ -702,6 +711,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 {
                     "id": row["muestra__asignaciones_punto_muestreo__punto_muestreo_id"],
                     "nombre": row["muestra__asignaciones_punto_muestreo__punto_muestreo__nombre"],
+                    "codigo": row["muestra__asignaciones_punto_muestreo__punto_muestreo__codigo"],
                     "maquina_id": row["muestra__asignaciones_punto_muestreo__punto_muestreo__maquina_id"],
                 }
                 for row in sampling_points
@@ -760,6 +770,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 | Q(muestra__referencia_equipo__nombre__icontains=search)
                 | Q(muestra__referencia_equipo__codigo_equipo__icontains=search)
                 | Q(muestra__asignaciones_punto_muestreo__punto_muestreo__nombre__icontains=search)
+                | Q(muestra__asignaciones_punto_muestreo__punto_muestreo__codigo__icontains=search)
             )
 
         return queryset.distinct()
