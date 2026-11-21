@@ -9,17 +9,12 @@ normal reception and laboratory workflow.
 import argparse
 import csv
 import json
+import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from etl_global_oil_domain import (
-    canonical_sampling_identity,
-    has_source_plate,
-    norm,
-    plate_code,
-    split_machine_and_point,
-)
+from etl_global_oil_domain import has_source_plate, norm, plate_code, split_machine_and_point
 from load_global_oil_via_api import Api
 
 
@@ -105,11 +100,21 @@ def sample_payload(row, point_id, atributos_tecnicos):
     equipment = norm(row.get("EQUIPO"))
     oil_service = number(row.get("PERIODO DE SERVICIO"))
     equipment_service = number(row.get("PERIODO DE SERVICIO EQUIPO"))
+    source_comments = {
+        column: str(value).strip()
+        for column, value in row.items()
+        if re.fullmatch(r"COM_.+", str(column)) and str(value or "").strip()
+    }
+    source_plate = plate_code(row.get("PLACA"))
     return {
         "fecha_toma": sample_date(row),
         "tipo_muestra": "aceite", "condicion": "usada",
         "contacto_cliente": norm(row.get("CONTACTO")) or None,
-        "equipo_placa": norm(row.get("PLACA")) if equipment == "DESCONOCIDO" else None,
+        # A registered point owns the machine and intentionally clears the
+        # manual-equipment field in the intake serializer.  Preserve PLACA as
+        # manual equipment only for unknown machines; its point-code meaning
+        # is retained separately below and rendered from the actual point.
+        "equipo_placa": source_plate if equipment == "DESCONOCIDO" else None,
         "punto_muestreo": point_id,
         "lubricante_nuevo": lubricant or None,
         "referencia_marca": lubricant or None,
@@ -131,6 +136,8 @@ def sample_payload(row, point_id, atributos_tecnicos):
             "grado_viscosidad_origen": norm(row.get("Viscosidad")),
             "especificacion_origen": norm(row.get("Esp_Cal")),
             "conclusion_origen": norm(row.get("CONCLUSIÓN")),
+            "comentarios_origen": source_comments,
+            "codigo_punto_origen": source_plate or None,
         },
     }
 
@@ -224,14 +231,7 @@ def main():
     company_cache, machine_cache, point_cache, audit = {}, {}, {}, list(existing.values())
 
     def point_for(row):
-        company = norm(row.get("CLIENTE"))
-        source_machine, source_point = split_machine_and_point(norm(row.get("EQUIPO")))
-        source_plate = plate_code(row.get("PLACA"))
-        # The asset loader uses the approved code-to-machine homologation.
-        # Resolve samples through that exact same identity, otherwise a legacy
-        # equipment name would look for a machine that intentionally no longer
-        # exists after duplicate consolidation.
-        machine, point = canonical_sampling_identity(company, source_plate, source_machine, source_point)
+        company = norm(row.get("CLIENTE")); machine, point = split_machine_and_point(norm(row.get("EQUIPO")))
         company_id = company_cache.get(company)
         if company_id is None:
             matches = [item for item in api.get("companies/buscar/", {"nombre": company}) if norm(item.get("nombre")) == company]
@@ -243,6 +243,7 @@ def main():
             matches = [item for item in api.get("machines/", {"empresa": company_id, "search": machine}) if norm(item.get("nombre")) == machine]
             if not matches: raise RuntimeError(f"Máquina inexistente en API: {company} / {machine}")
             machine_id = machine_cache[machine_key] = matches[0]["id"]
+        source_plate = plate_code(row.get("PLACA"))
         identity = (company, machine, "placa", source_plate) if has_source_plate(source_plate) else (company, machine, "nombre", point)
         point_spec = point_specs.get(identity)
         if not point_spec:
@@ -278,8 +279,24 @@ def main():
             response_samples = batch.get("muestras", [])
             if len(response_samples) != len(part):
                 raise RuntimeError(f"Lote {batch.get('id')}: API devolvió {len(response_samples)} de {len(part)} muestras")
-            for source_row, created in zip(part, response_samples):
-                audit.append({"oa": str(source_row.get("OA")), "muestra": created["id"], "lote": batch["id"]})
+            # The API serializes ``muestras`` using model ordering, not the
+            # order received in this POST.  Pairing by position silently
+            # crossed source rows and sample IDs, then routed results and
+            # conclusions to the wrong samples.  oa_origen is the immutable
+            # import key, so it is the only valid join key here.
+            created_by_oa = {
+                str((created.get("campos_adicionales") or {}).get("oa_origen") or "").strip(): created
+                for created in response_samples
+            }
+            expected_oas = {str(source_row.get("OA") or "").strip() for source_row in part}
+            if set(created_by_oa) != expected_oas or any(not item.get("id") for item in created_by_oa.values()):
+                raise RuntimeError(
+                    f"Lote {batch.get('id')}: no se pudo reconciliar la respuesta por oa_origen; "
+                    f"esperadas={sorted(expected_oas)}, recibidas={sorted(created_by_oa)}"
+                )
+            for source_row in part:
+                oa = str(source_row.get("OA") or "").strip()
+                audit.append({"oa": oa, "muestra": created_by_oa[oa]["id"], "lote": batch["id"]})
     report = args.artifacts / "reports" / "carga_api_muestras.json"
     report.write_text(json.dumps(audit, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     rejected_report = args.artifacts / "qa" / "muestras_no_importables.json"

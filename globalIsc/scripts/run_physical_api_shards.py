@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch the four resumable physical-result API import shards from one password prompt."""
+"""Run resumable physical-result API shards without overloading local Docker."""
 import getpass
 import os
 import subprocess
@@ -21,8 +21,13 @@ def main():
     )
     parser.add_argument(
         "--base-url",
-        default=os.environ.get("GLOBAL_OIL_API_BASE_URL", "http://localhost:8001"),
-        help="URL de la API; en el VPS use http://localhost:8000 dentro del contenedor web.",
+        default="http://localhost:8000",
+        help="URL de la API local; debe coincidir con la usada por la ETL principal.",
+    )
+    parser.add_argument(
+        "--email",
+        default="admin@globaloil.local",
+        help="Correo del administrador usado por toda la ETL.",
     )
     args = parser.parse_args()
 
@@ -33,7 +38,7 @@ def main():
     environment[args.password_env] = password
     logs = ARTIFACTS / "reports" / "logs"
     logs.mkdir(parents=True, exist_ok=True)
-    children = []
+    failures = []
     for shard in range(4):
         command = [
             sys.executable, str(SCRIPT_DIR / "submit_compound_results_via_api.py"),
@@ -42,19 +47,26 @@ def main():
             "--payload-file", "api_result_payloads_physical.jsonl",
             "--report-file", f"carga_api_resultados_fisicos_forms_shard{shard}.json",
             "--base-url", args.base_url,
-            "--email", "admin@globaloil.local",
+            "--email", args.email,
             "--password-env", args.password_env,
             "--apply", "--resume",
             "--batch-shard-count", "4", "--batch-shard-index", str(shard),
         ]
+        # Four simultaneous requests were fast but could exhaust a small
+        # Docker Desktop VM during a full historical import.  Each shard has
+        # an independent checkpoint, so sequential execution remains fully
+        # resumable while keeping the database stable.
         stdout = (logs / f"physical_shard{shard}.out.log").open("w", encoding="utf-8")
         stderr = (logs / f"physical_shard{shard}.err.log").open("w", encoding="utf-8")
-        children.append((shard, subprocess.Popen(command, cwd=SCRIPT_DIR, env=environment, stdout=stdout, stderr=stderr), stdout, stderr))
-    for shard, child, stdout, stderr in children:
+        child = subprocess.Popen(command, cwd=SCRIPT_DIR, env=environment, stdout=stdout, stderr=stderr)
         status = child.wait()
-        stdout.close(); stderr.close()
+        stdout.close()
+        stderr.close()
         print(f"shard={shard} exit={status}", flush=True)
-    if any(child.returncode for _, child, _, _ in children):
+        if status:
+            failures.append(shard)
+            break
+    if failures:
         raise SystemExit(1)
 
 

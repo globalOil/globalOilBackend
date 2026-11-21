@@ -238,6 +238,10 @@
   .result-layout .field-value {
     display: inline;
     padding: 1px 2px;
+    /* The result is raw measured data.  Its colour must not compete with
+       the evaluation, which is communicated exclusively in ESTADO. */
+    background: transparent;
+    color: #000;
   }
 
   .result-layout .separator {
@@ -409,7 +413,7 @@
   <table class="header">
     <tr>
       <td class="header-logo-cell">
-        <img class="logo-global" src="./logo-globaloil.jpg">
+        <img class="logo-global" src="{{ logo_global }}">
         <div class="company-small">
           <strong>NIT: 830135980-4</strong><br>
           Parque Industrial Ciem Oikos de Occidente<br>
@@ -481,7 +485,7 @@
         <th class="result-col">RESULTADO</th>
         <th class="unit-col">UNIDADES</th>
         <th class="bands-col">BANDAS DE EVALUACIÓN</th>
-        <th class="comment-col">ESTADO</th>
+        <th class="comment-col">COMENTARIO</th>
       </tr>
     </thead>
     <tbody>
@@ -490,19 +494,15 @@
         {% if grupo.list|length > 1 %}
           {% for row in grupo.list %}
             <tr>
-              {% if forloop.first %}
-                <td class="analysis-main" rowspan="{{ grupo.list|length }}">{{ grupo.grouper }}</td>
-              {% endif %}
+              {% if forloop.first %}<td class="analysis-main" rowspan="{{ grupo.list|length }}">{{ grupo.grouper }}</td>{% endif %}
               <td class="analysis-sub">{{ row.subanalisis|default:"-" }}</td>
-              {% if forloop.first %}
-                <td class="center method-col" rowspan="{{ grupo.list|length }}">{{ grupo.list.0.metodo|default:"-" }}</td>
-              {% endif %}
+              {% if forloop.first %}<td class="center method-col" rowspan="{{ grupo.list|length }}">{{ grupo.list.0.metodo|default:"-" }}</td>{% endif %}
               <td class="result-col">
                 {% if row.display_tokens %}
                   <div class="result-layout">
                     {% for token in row.display_tokens %}
                       {% if token.type == "field" %}
-                        <span class="field-value status-{{ token.field.status_class }}">{{ token.field.resultado|default:"-" }}</span>
+                        <span class="field-value">{{ token.field.resultado|default:"-" }}</span>
                       {% elif token.type == "break" %}
                         <span class="layout-break"></span>
                       {% else %}
@@ -541,7 +541,7 @@
                   <div class="result-layout">
                     {% for token in prueba.display_tokens %}
                       {% if token.type == "field" %}
-                        <span class="field-value status-{{ token.field.status_class }}">{{ token.field.resultado|default:"-" }}</span>
+                        <span class="field-value">{{ token.field.resultado|default:"-" }}</span>
                       {% elif token.type == "break" %}
                         <span class="layout-break"></span>
                       {% else %}
@@ -596,6 +596,9 @@
         <div class="responsible-name">{{ responsable }}</div>
         {% if reporte_info.firma_url %}
           <img class="signature" src="{{ reporte_info.firma_url }}">
+          {% if reporte_info.firma_historica_no_verificada %}
+            <div style="font-size: 6.5pt; color: #666; margin-top: 2px;">Marca histórica no verificada</div>
+          {% endif %}
         {% endif %}
       </td>
     </tr>

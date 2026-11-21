@@ -4,13 +4,34 @@
 Every transition uses the public API.  Reports are generated but never approved,
 published or emailed.
 """
-import argparse, json, os
+import argparse, json, os, re
 from collections import defaultdict
 from pathlib import Path
 from load_global_oil_via_api import Api
 
 
 def raw_rows(path): return [json.loads(line)["data"] for line in path.open(encoding="utf-8") if line.strip()]
+
+
+def source_editorial_comments(row):
+    """Return only the narrative conclusions authored in the OA export.
+
+    ``COM_<test>`` columns carry a per-test state (NORMAL, NO DESEADO, ...).
+    They remain preserved in the raw ETL artifact, but they are not report
+    prose.  ``COM_1``, ``COM_2``, ... are the laboratory's actual narrative
+    comments and must travel into the imported interpretation/report.
+    """
+    numbered = []
+    for column, value in row.items():
+        matched = re.fullmatch(r"COM_(\d+)", str(column or ""))
+        text = str(value or "").strip()
+        if matched and text:
+            numbered.append((int(matched.group(1)), text))
+    return [text for _, text in sorted(numbered)]
+
+
+def source_responsible(row):
+    return " ".join(str(row.get("Responsable") or "").split())
 
 
 def main():
@@ -44,11 +65,20 @@ def main():
             row=source[item["oa"]]; conclusion=str(row.get("CONCLUSIÓN") or "").strip() or "Sin conclusión histórica disponible. Requiere revisión técnica."
             api.post(f"lubrication/interpretation/samples/{item['muestra']}/", {
                 "conclusion": conclusion,
-                "comentarios_predefinidos": [], "comentarios_manuales": [],
+                "comentarios_predefinidos": source_editorial_comments(row), "comentarios_manuales": [],
                 "graficas_activas": False, "graficas_seleccionadas": [],
                 "motivo": "Interpretación histórica importada; requiere validación técnica antes de aprobación.",
             })
-        result=api.post("lubrication/reports/generate-batch-from-interpretation/", {"lote":batch,"responsable":"Global Oil - migración histórica"})
+        responsables_por_muestra = {
+            item["muestra"]: source_responsible(source[item["oa"]])
+            for item in samples
+            if source_responsible(source[item["oa"]])
+        }
+        result=api.post("lubrication/reports/generate-batch-from-interpretation/", {
+            "lote": batch,
+            "responsable": "Global Oil - migración histórica",
+            "responsables_por_muestra": responsables_por_muestra,
+        })
         audit.append({"lote":batch,"muestras":len(samples),"reportes":result.get("generated",0),"visible_cliente":False,"aprobados":False})
         report.write_text(json.dumps(audit,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
     report.write_text(json.dumps(audit,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")

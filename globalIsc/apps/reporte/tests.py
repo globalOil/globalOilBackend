@@ -18,6 +18,8 @@ from apps.reporte.api.models.index import Reporte
 from apps.reporte.api.views.index import (
     ReporteViewSet,
     _clean_limit_label,
+    _historical_comment_for,
+    _historical_comment_lookup,
     _report_limit_bands,
     _report_status,
     _trend_chart_data_uri,
@@ -79,6 +81,20 @@ class ReportSemaphoreTests(SimpleTestCase):
         self.assertEqual(
             _clean_limit_label("{'min_aceptable': 10, 'max_aceptable': 20}"),
             "Límite configurado",
+        )
+
+    def test_historical_comment_matches_legacy_viscosity_label(self):
+        class HistoricalSample:
+            campos_adicionales = {
+                "comentarios_origen": {
+                    "COM_Viscosidad Cinemática 100° C": "NO DESEADO",
+                }
+            }
+
+        lookup = _historical_comment_lookup(HistoricalSample())
+        self.assertEqual(
+            _historical_comment_for(lookup, "Viscosidad cinemática a 100 °C"),
+            "NO DESEADO",
         )
 
     def test_trend_chart_is_embedded_as_a_pdf_safe_image(self):
@@ -193,6 +209,27 @@ class ReportEmailTests(TestCase):
         self.assertEqual(response.status_code, 201)
         generated = Reporte.objects.get(pk=response.data["id"])
         self.assertEqual(generated.firma_ruta, "firmas_usuarios/firma-admin.png")
+
+    def test_generating_again_advances_the_same_sample_version(self):
+        """A new report is a new version, never a duplicate-key error."""
+        self.user.is_superuser = True
+        self.user.is_active = True
+        self.user.save(update_fields=["is_superuser", "is_active"])
+        self.sample.is_revisado = True
+        self.sample.campos_adicionales = {"interpretacion": {"conclusion": "Muestra evaluada."}}
+        self.sample.save(update_fields=["is_revisado", "campos_adicionales"])
+        view = ReporteViewSet.as_view({"post": "generate_from_interpretation"})
+
+        for expected_version in (2, 3):
+            request = APIRequestFactory().post(
+                "/api/lubrication/reports/generate-from-interpretation/",
+                {"muestra": self.sample.id},
+                format="json",
+            )
+            force_authenticate(request, user=self.user)
+            response = view(request)
+            self.assertEqual(response.status_code, 201, response.data)
+            self.assertEqual(response.data["version"], expected_version)
 
     def test_generate_batch_from_interpretation_creates_one_report_per_sample(self):
         self.user.is_superuser = True
@@ -354,10 +391,11 @@ class ReportEmailTests(TestCase):
         force_authenticate(request, user=self.user)
         view = ReporteViewSet.as_view({"get": "dashboard"})
 
-        # Una lectura del listado, una del resumen y tres consultas DISTINCT
-        # pequeñas para Cliente/Equipo/Punto. No se carga el JSON pesado de
-        # cada reporte ni se consulta el módulo de activos por separado.
-        with self.assertNumQueries(5):
+        # Una lectura del listado, una precarga de los puntos activos, una
+        # del resumen y tres consultas DISTINCT para Cliente/Equipo/Punto.
+        # No se carga el JSON pesado de cada reporte ni se hace una consulta
+        # por cada muestra para resolver su punto de medida.
+        with self.assertNumQueries(6):
             response = view(request)
 
         self.assertEqual(response.status_code, 200)

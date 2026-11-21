@@ -57,6 +57,7 @@ class FolderViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         "create": "activos.crear_carpeta",
         "update": "activos.editar_carpeta",
         "partial_update": "activos.editar_carpeta",
+        "move": "activos.editar_carpeta",
         "destroy": "activos.eliminar_carpeta",
     }
     filter_backends = [DjangoFilterBackend]
@@ -110,6 +111,53 @@ class FolderViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             )
         return super().update(request, *args, **kwargs)
 
+    @action(detail=True, methods=['post'], url_path='move')
+    def move(self, request, pk=None):
+        """Re-parent a non-root grouping folder without permitting cycles."""
+        folder = self.get_object()
+        if folder.typeFolder == 'root' or str(folder.id_parent_node) == '-1':
+            return Response(
+                {'detail': 'La carpeta raíz representa a la empresa y no se puede mover.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        if folder.typeFolder != 'folder':
+            return Response(
+                {'detail': 'Solo las carpetas de agrupación se pueden mover con esta acción.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        parent_folder_id = request.data.get('parent_folder')
+        if not parent_folder_id:
+            return Response({'parent_folder': 'Seleccione la carpeta destino.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            parent_folder = Carpeta.objects.get(pk=parent_folder_id)
+        except (Carpeta.DoesNotExist, TypeError, ValueError):
+            return Response({'parent_folder': 'La carpeta destino no existe.'}, status=status.HTTP_400_BAD_REQUEST)
+        if parent_folder.compania_id != folder.compania_id:
+            return Response({'parent_folder': 'La carpeta destino debe pertenecer a la misma empresa.'}, status=status.HTTP_400_BAD_REQUEST)
+        if parent_folder.typeFolder not in {'root', 'folder'}:
+            return Response({'parent_folder': 'El destino debe ser una carpeta de agrupación.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Walking only the parent chain makes this deterministic and catches a
+        # destination anywhere inside the folder being moved.
+        ancestor_id, visited = str(parent_folder.id), set()
+        while ancestor_id and ancestor_id != '-1' and ancestor_id not in visited:
+            if ancestor_id == str(folder.id):
+                return Response(
+                    {'parent_folder': 'No puede mover una carpeta dentro de sí misma ni de una subcarpeta.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            visited.add(ancestor_id)
+            ancestor = Carpeta.objects.filter(pk=ancestor_id).only('id_parent_node').first()
+            if not ancestor:
+                break
+            ancestor_id = str(ancestor.id_parent_node)
+
+        if str(folder.id_parent_node) != str(parent_folder.id):
+            folder.id_parent_node = str(parent_folder.id)
+            folder.save(update_fields=['id_parent_node'])
+        return Response(self.get_serializer(folder).data)
+
 
 class MaquinaViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     pagination_class = StandardResultsSetPagination
@@ -124,6 +172,7 @@ class MaquinaViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         "partial_update": "maquinas.editar",
         "destroy": "maquinas.eliminar",
         "reactivate": "maquinas.editar",
+        "move": "maquinas.editar",
         "activity": "maquinas.ver",
         "history": "maquinas.ver",
         "resolve_point_code": "maquinas.ver",
@@ -358,6 +407,62 @@ class MaquinaViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             before=before,
             after=self._audit_snapshot(machine),
         )
+        return Response(self.get_serializer(machine).data)
+
+    @action(detail=True, methods=['post'], url_path='move')
+    def move(self, request, pk=None):
+        """Move a machine's single tree node without touching its operational data.
+
+        A machine, its sampling points and its samples are separate domain
+        records.  Only ``Carpeta.id_parent_node`` represents where the machine
+        is displayed in the asset tree, so relocating it must never recreate
+        points or change historical sample associations.
+        """
+        machine = self.get_object()
+        parent_folder_id = request.data.get('parent_folder')
+        if not parent_folder_id:
+            return Response(
+                {'parent_folder': 'Seleccione la carpeta destino.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            parent_folder = Carpeta.objects.get(pk=parent_folder_id)
+        except (Carpeta.DoesNotExist, TypeError, ValueError):
+            return Response(
+                {'parent_folder': 'La carpeta destino no existe.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if parent_folder.compania_id != machine.empresa_id:
+            return Response(
+                {'parent_folder': 'La carpeta destino debe pertenecer a la misma empresa.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if parent_folder.typeFolder not in {'root', 'folder'}:
+            return Response(
+                {'parent_folder': 'El destino debe ser una carpeta de agrupación.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            node = ensure_machine_tree_node(machine)
+            previous_parent_id = str(node.id_parent_node)
+            if previous_parent_id == str(parent_folder.id):
+                return Response(self.get_serializer(machine).data)
+            node.id_parent_node = str(parent_folder.id)
+            node.save(update_fields=['id_parent_node'])
+            record_operational_event(
+                actor=request.user,
+                action='maquina.reubicada',
+                entity_type='maquina',
+                entity_id=machine.id,
+                entity_label=machine.nombre,
+                maquina=machine,
+                detail=f'Máquina movida a la carpeta "{parent_folder.nombre}".',
+                before={'parent_folder_id': previous_parent_id},
+                after={'parent_folder_id': str(parent_folder.id), 'parent_folder_name': parent_folder.nombre},
+            )
         return Response(self.get_serializer(machine).data)
 
     @action(detail=True, methods=['get'], url_path='activity')

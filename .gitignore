@@ -69,6 +69,7 @@ backups/
 /globalIsc/apps/media/firmas_usuarios/
 /globalIsc/apps/media/reportes/
 globalIsc/outputs/
+globalIsc/.etl-inputs/
 /pdf-qa/
 
 # Archivos de coverage

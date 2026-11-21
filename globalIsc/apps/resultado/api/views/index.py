@@ -394,16 +394,9 @@ def _validate_result_value(field, value):
         try:
             Decimal(str(value).replace(",", "."))
         except (InvalidOperation, TypeError, ValueError):
-            # Laboratory reports frequently encode a value below or above the
-            # method detection limit (for example ``<1`` for metals).  It is a
-            # quantitative observation with a qualifier, not the exact number
-            # one; preserve it verbatim so imports and manual entry do not
-            # corrupt the analytical meaning.  The limit engine deliberately
-            # treats qualified values as non-evaluable until it receives an
-            # explicit qualified-value policy.
             qualified_number = r"^\s*(?:<=|>=|<|>)\s*(?:\d+(?:[\.,]\d*)?|[\.,]\d+)\s*$"
             if not re.match(qualified_number, str(value)):
-                return "Ingrese un valor numÃ©rico válido o un valor calificado como <1."
+                return "Ingrese un valor numérico válido o un valor calificado como <1."
 
     if tipo == "booleano":
         normalized = str(value).strip().casefold()
@@ -1595,14 +1588,26 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             queryset, self.request.user, "prueba_muestra__muestra__lote__cliente_empresa_id"
         )
 
+    def _global_interpretation_only(self):
+        """Interpretation contains Global's internal technical workflow.
+
+        Company users may consult their reports and historical trends, but
+        they must never obtain the underlying interpretation payload through a
+        direct URL or API request.
+        """
+        user = self.request.user
+        if user.is_superuser or user.role == User.Role.GLOBAL:
+            return None
+        return Response(
+            {"detail": "La interpretación técnica solo está disponible para usuarios de Global."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
     def _scope_lotes(self, queryset=None):
         queryset = queryset or LoteMuestras.objects.all()
         return scope_queryset(queryset, self.request.user, "cliente_empresa_id")
 
     def _scope_sample_tests(self, queryset=None):
-        # A QuerySet has a truthiness check that evaluates it.  During the
-        # Excel importer that accidental evaluation reads every assignment
-        # before the caller can filter by ID, causing local worker timeouts.
         if queryset is None:
             queryset = PruebaMuestra.objects.all()
         return scope_queryset(queryset, self.request.user, "muestra__lote__cliente_empresa_id")
@@ -2126,9 +2131,10 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Historical imports can contain component values absent from the
-        # laboratory export.  This explicit API opt-in preserves those drafts
-        # without inventing values; normal UI confirmation is unchanged.
+        # Historical imports may legitimately omit component values that were
+        # absent from the source laboratory export.  The importer opts in to
+        # this narrow exception; ordinary UI confirmations keep requiring all
+        # configured fields.
         allow_incomplete_historical = bool(request.data.get("allow_incomplete_historical"))
         results = {}
         incomplete = []
@@ -2144,13 +2150,7 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             missing_fields = [
                 field.get("label") or field.get("key")
                 for field in _build_result_fields(sample_test)
-                # Metals reported as `<1` are intentionally omitted by the
-                # historic ETL: they are non-detections, not zero or one.  An
-                # ELEMENTOS result is therefore complete when every reported
-                # metal is saved, even if other analytical fields are absent.
                 if value_by_key.get(field.get("key")) in [None, ""]
-                and field.get("requiere_valor", True)
-                and sample_test.prueba.acronimo != "ELEMENTOS"
             ]
             if not result or (missing_fields and not allow_incomplete_historical):
                 incomplete.append({
@@ -2821,15 +2821,10 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 continue
 
             index = {name: headers.index(name) for name in headers if name}
-            # `read_only=True` worksheets are streaming XML readers.  Calling
-            # ws.cell() for every column/row restarts the stream repeatedly and
-            # makes a normal batch import exceed Gunicorn's timeout.  Consume
-            # each row exactly once instead.
             for row_number, cells in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
                 def cell_value(name, default=None):
                     position = index.get(name)
                     return cells[position] if position is not None and position < len(cells) else default
-
                 prueba_muestra_id = cell_value("PruebaMuestraID")
                 field_key = cell_value("CampoKey")
                 value = cell_value("Valor")
@@ -3322,6 +3317,9 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def interpretation_batch_detail(self, request, lote_id=None):
+        denied = self._global_interpretation_only()
+        if denied:
+            return denied
         lote_id = lote_id or request.query_params.get("lote")
         lote = get_object_or_404(
             self._scope_lotes(LoteMuestras.objects.select_related("cliente_empresa", "tipo_gestion").prefetch_related("muestras")),
@@ -3331,6 +3329,9 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def interpretation_sample(self, request, muestra_id=None):
+        denied = self._global_interpretation_only()
+        if denied:
+            return denied
         from apps.muestras.api.models.muestras.index import Muestra
         muestra = get_object_or_404(
             self._scope_samples(
@@ -3443,12 +3444,18 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def interpretation_versions(self, request, muestra_id=None):
+        denied = self._global_interpretation_only()
+        if denied:
+            return denied
         muestra = get_object_or_404(self._scope_samples(Muestra.objects), pk=muestra_id)
         versions = VersionInterpretacion.objects.filter(muestra=muestra).select_related("creado_por")
         return Response(VersionInterpretacionSerializer(versions, many=True).data)
 
     @action(detail=False, methods=["patch", "post"])
     def save_interpretation_sample(self, request, muestra_id=None):
+        denied = self._global_interpretation_only()
+        if denied:
+            return denied
         from apps.muestras.api.models.muestras.index import Muestra
         muestra = get_object_or_404(self._scope_samples(Muestra.objects), pk=muestra_id)
         reason = str(request.data.get("motivo") or "").strip()
@@ -3513,6 +3520,9 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def interpretation_trends(self, request, muestra_id=None):
+        denied = self._global_interpretation_only()
+        if denied:
+            return denied
         from apps.muestras.api.models.muestras.index import Muestra
         from apps.activesTree.api.models.index import AsignacionPuntoMuestreo
 

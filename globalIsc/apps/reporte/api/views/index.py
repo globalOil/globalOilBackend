@@ -1,8 +1,11 @@
 import base64
 import io
 import json
+import json
 import logging
 import os
+import re
+import unicodedata
 import uuid
 import zipfile
 from collections import defaultdict
@@ -68,6 +71,42 @@ def _interpretation_from_sample(muestra):
     if not isinstance(extra, dict):
         return {}
     return extra.get("interpretacion", {}) or {}
+
+
+def _historical_comment_key(value):
+    """Normalize an OA analysis label so it can match its ``COM_<field>``.
+
+    Historical workbooks use accents, degree symbols and occasional spacing
+    variants (for example, ``Viscosidad Cinemática 100° C``).  The raw
+    laboratory comment remains the source of truth, so matching is tolerant
+    without altering the comment value itself.
+    """
+    text = re.sub(r"\b(?:a|de|del)\b", " ", str(value or ""), flags=re.IGNORECASE)
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9]", "", text.casefold())
+
+
+def _historical_comment_lookup(muestra):
+    extra = getattr(muestra, "campos_adicionales", None) or {}
+    raw_comments = extra.get("comentarios_origen", {}) if isinstance(extra, dict) else {}
+    if not isinstance(raw_comments, dict):
+        return {}
+    return {
+        _historical_comment_key(column.removeprefix("COM_")): str(value).strip()
+        for column, value in raw_comments.items()
+        if str(column).startswith("COM_")
+        and not re.fullmatch(r"COM_\d+", str(column))
+        and str(value or "").strip()
+    }
+
+
+def _historical_comment_for(lookup, *labels):
+    for label in labels:
+        comment = lookup.get(_historical_comment_key(label))
+        if comment:
+            return comment
+    return ""
 
 
 def _configured_predefined_comments(interpretation):
@@ -366,6 +405,8 @@ def _report_comment_class(comment):
         return "warning"
     if comment in ["NO EVALUABLE", "SIN EVALUAR", "INFORMATIVO"]:
         return "neutral"
+    if comment in ["NO DESEADO", "NO_DESEADO", "ALERTA"]:
+        return "warning"
     if comment in ["NORMAL", "ACEPTABLE"]:
         return "normal"
     return "pending"
@@ -875,8 +916,30 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         interpretation = _interpretation_from_sample(muestra)
         if tests is None:
             tests = [item for item in _sample_tests_for_lote(lote) if item["muestra"] == muestra.id] if lote else []
+        historical_comments = _historical_comment_lookup(muestra)
+        tests = [
+            {
+                **item,
+                "comentario_historico": _historical_comment_for(
+                    historical_comments,
+                    (item.get("prueba") or {}).get("nombre_variable"),
+                    (item.get("prueba") or {}).get("acronimo"),
+                ),
+            }
+            for item in tests
+        ]
         equipo = getattr(muestra, "referencia_equipo", None)
         empresa = getattr(lote, "cliente_empresa", None) if lote else None
+        point_assignment = (
+            AsignacionPuntoMuestreo.objects.filter(muestra=muestra, activa=True)
+            .select_related("punto_muestreo")
+            .first()
+        )
+        punto_muestreo = getattr(point_assignment, "punto_muestreo", None)
+        # Historical OA exports call the measurement-point code "PLACA".
+        # A registered point clears the sample's manual plate by design, so
+        # take the displayed plate from that assigned point first.
+        point_code = getattr(punto_muestreo, "codigo", None) or (muestra.campos_adicionales or {}).get("codigo_punto_origen")
 
         comments = {
             "predefinidos": _configured_predefined_comments(interpretation),
@@ -915,7 +978,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 "condicion": muestra.condicion,
                 "referencia_marca": muestra.referencia_marca,
                 "contacto_cliente": muestra.contacto_cliente,
-                "equipo_placa": muestra.equipo_placa,
+                "equipo_placa": point_code or muestra.equipo_placa,
                 "periodo_servicio_aceite": muestra.periodo_servicio_aceite,
                 "unidad_periodo_aceite": muestra.unidad_periodo_aceite,
                 "periodo_servicio_equipo": muestra.periodo_servicio_equipo,
@@ -925,6 +988,11 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 "id": getattr(equipo, "id", None),
                 "nombre": getattr(equipo, "nombre", None) or getattr(equipo, "name", None) or muestra.equipo_placa,
                 "codigo": getattr(equipo, "codigo_equipo", None) or getattr(equipo, "codigo", None),
+            },
+            "punto_muestreo": {
+                "id": getattr(punto_muestreo, "id", None),
+                "nombre": getattr(punto_muestreo, "nombre", None),
+                "codigo": point_code,
             },
             "resultados": tests,
             "comentarios": comments,
@@ -951,7 +1019,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         )
         return (last or 0) + 1
 
-    def _create_from_interpretation(self, muestra, request, *, tests=None, version=None, interpretation_version=None):
+    def _create_from_interpretation(self, muestra, request, *, tests=None, version=None, interpretation_version=None, responsable=None):
         version = version or self._next_version(muestra.id)
         interpretation_version = interpretation_version or _interpretation_version_for_report(muestra, request.user)
         snapshot = self._build_snapshot(muestra, request.user, tests=tests)
@@ -972,7 +1040,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         if not firma_ruta:
             firma_ruta = _default_signature_path(request.user)
         firma_ruta = _normalise_signature_path(firma_ruta)
-        responsable = request.data.get("responsable") or _user_name(request.user)
+        responsable = responsable or request.data.get("responsable") or _user_name(request.user)
 
         return Reporte.objects.create(
             muestra=muestra,
@@ -997,18 +1065,29 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         if not muestra_id:
             return Response({"detail": "Debe enviar la muestra."}, status=status.HTTP_400_BAD_REQUEST)
 
-        muestra = self._tenant_samples_queryset().filter(pk=muestra_id).first()
-        if not muestra:
-            return Response({"detail": "Muestra no encontrada."}, status=status.HTTP_404_NOT_FOUND)
-        if muestra.estado_operativo != "activa":
-            return Response({"detail": "No puede generar un reporte para una muestra invalidada."}, status=status.HTTP_409_CONFLICT)
-        if not muestra.is_revisado:
-            return Response({"detail": "No puede generar reporte: la muestra aun no esta revisada."}, status=status.HTTP_400_BAD_REQUEST)
-        if not _has_interpretation(muestra):
-            return Response({"detail": "No puede generar reporte: primero guarde una interpretación válida de la muestra."}, status=status.HTTP_400_BAD_REQUEST)
+        # A report may be generated from this screen while a batch generation
+        # is still finishing.  Lock the sample row, just as the batch flow
+        # does, so both paths serialize the next version calculation instead
+        # of trying to insert the same (muestra, version) pair.
+        with transaction.atomic():
+            muestra = (
+                self._tenant_samples_queryset()
+                .select_related(None)
+                .select_for_update(of=("self",))
+                .filter(pk=muestra_id)
+                .first()
+            )
+            if not muestra:
+                return Response({"detail": "Muestra no encontrada."}, status=status.HTTP_404_NOT_FOUND)
+            if muestra.estado_operativo != "activa":
+                return Response({"detail": "No puede generar un reporte para una muestra invalidada."}, status=status.HTTP_409_CONFLICT)
+            if not muestra.is_revisado:
+                return Response({"detail": "No puede generar reporte: la muestra aun no esta revisada."}, status=status.HTTP_400_BAD_REQUEST)
+            if not _has_interpretation(muestra):
+                return Response({"detail": "No puede generar reporte: primero guarde una interpretación válida de la muestra."}, status=status.HTTP_400_BAD_REQUEST)
 
-        reporte = self._create_from_interpretation(muestra, request)
-        _mark_lote_reported_if_ready(muestra.lote)
+            reporte = self._create_from_interpretation(muestra, request)
+            _mark_lote_reported_if_ready(muestra.lote)
         audit_user_action(request, "report.generated", metadata={"report_id": reporte.pk, "sample_id": muestra.pk})
         record_operational_event(
             actor=request.user,
@@ -1031,6 +1110,9 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
     @action(detail=False, methods=["post"], url_path="generate-batch-from-interpretation")
     def generate_batch_from_interpretation(self, request):
         lote_id = request.data.get("lote") or request.data.get("lote_id")
+        responsables_por_muestra = request.data.get("responsables_por_muestra") or {}
+        if not isinstance(responsables_por_muestra, dict):
+            raise ValidationError({"responsables_por_muestra": "Debe ser un objeto {muestra: responsable}."})
         if not lote_id:
             return Response({"detail": "Debe enviar el lote."}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
@@ -1093,6 +1175,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                     tests=tests_by_sample.get(sample.id, []),
                     version=(latest_report_versions.get(sample.id) or 0) + 1,
                     interpretation_version=latest_interpretations.get(sample.id),
+                    responsable=responsables_por_muestra.get(sample.id),
                 ))
             _mark_lote_reported_if_ready(lote)
         audit_user_action(request, "report.batch_generated", metadata={"batch_id": lote.pk, "report_count": len(reports)})
@@ -1719,13 +1802,18 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         """)
         return fallback.render(Context(context))
 
-    def _result_structure_rows(self, item, nombre, metodo, unidad, parent_limit, parent_estado):
+    def _result_structure_rows(self, item, nombre, metodo, unidad, parent_limit, parent_estado, historical_comments=None):
         evaluation = item.get("evaluacion_limite") or {}
         details = item.get("limite_detalles") or evaluation.get("details") or []
         result_outcomes = (
             evaluation.get("result_outcomes")
             or (evaluation.get("raw") or {}).get("result_outcomes")
             or []
+        )
+        historical_comment = item.get("comentario_historico") or _historical_comment_for(
+            historical_comments or {},
+            nombre,
+            (item.get("prueba") or {}).get("acronimo"),
         )
         fallback_row = {
             "id": item.get("id"),
@@ -1735,8 +1823,8 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             "resultado": item.get("resultado_resumen") or "-",
             "unidad": unidad,
             "limite": parent_limit,
-            "comentario": parent_estado,
-            "comentario_class": _report_comment_class(parent_estado),
+            "comentario": historical_comment or parent_estado,
+            "comentario_class": _report_comment_class(historical_comment or parent_estado),
             "comentario_detalle": "",
             "campos": [],
         }
@@ -1823,6 +1911,9 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 "resultado": value if value not in [None, ""] else "-",
                 "unidad": field_unit if field_unit not in [None, ""] else "-",
                 "status": field_status,
+                "comentario_historico": _historical_comment_for(
+                    historical_comments or {}, field_label, detail.get("field"), detail.get("componente")
+                ),
                 "status_class": _report_comment_class(field_status),
                 "reason": detail.get("reason") or "",
                 **_report_limit_bands(detail),
@@ -1902,7 +1993,15 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 (hierarchy_outcome or {}).get("estado"),
                 (hierarchy_outcome or {}).get("passed"),
             ) if hierarchy_outcome else None
-            if hierarchy_status:
+            source_comments = [field["comentario_historico"] for field in fields if field.get("comentario_historico")]
+            unique_source_comments = list(dict.fromkeys(source_comments))
+            if historical_comment:
+                estado = historical_comment
+            elif len(unique_source_comments) == 1:
+                estado = unique_source_comments[0]
+            elif len(unique_source_comments) > 1:
+                estado = "MIXTO"
+            elif hierarchy_status:
                 estado = hierarchy_status
             elif "CRÍTICO" in states:
                 estado = "CRÍTICO"
@@ -1959,9 +2058,18 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         equipo = snapshot.get("equipo", {})
         comentarios = snapshot.get("comentarios", {})
         resultados = snapshot.get("resultados", [])
+        historical_comments = _historical_comment_lookup(reporte.muestra)
 
         pruebas = []
-        for item in resultados:
+        for raw_item in resultados:
+            item = {
+                **raw_item,
+                "comentario_historico": raw_item.get("comentario_historico") or _historical_comment_for(
+                    historical_comments,
+                    (raw_item.get("prueba") or {}).get("nombre_variable"),
+                    (raw_item.get("prueba") or {}).get("acronimo"),
+                ),
+            }
             prueba = item.get("prueba", {})
             nombre = prueba.get("nombre_variable") or prueba.get("acronimo") or "-"
             metodo = item.get("metodo_codigo") or item.get("metodo") or "-"
@@ -1969,7 +2077,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             limite = _clean_limit_label(item.get("limite_resumen") or (item.get("evaluacion_limite") or {}).get("summary") or "-")
             estado = self._estado_reporte(item.get("estado_limite"))
 
-            pruebas.extend(self._result_structure_rows(item, nombre, metodo, unidad, limite, estado))
+            pruebas.extend(self._result_structure_rows(item, nombre, metodo, unidad, limite, estado, historical_comments))
 
         comments = (comentarios.get("predefinidos") or []) + (comentarios.get("manuales") or [])
         conclusion = comentarios.get("conclusion") or reporte.conclusiones or ""
@@ -1999,7 +2107,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             except Exception:
                 firma_src = firma_url
 
-        logo_global = "/media/templates/logo-globaloil.png"
+        logo_global = f"/media/templates/{settings.REPORT_LOGO_FILENAME}"
         logo_report = "/media/templates/icon-report.png"
 
         return {
@@ -2015,6 +2123,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 "logo_global": logo_global,
                 "logo_report": logo_report,
                 "firma_url": firma_src,
+                "firma_historica_no_verificada": firma_path.startswith("firmas_usuarios/historicas/") if firma_url else False,
             },
             "muestra_info": muestra,
             "equipo_info": equipo,
@@ -2031,6 +2140,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             "fecha_emision": reporte.fecha_emision.strftime("%d/%m/%Y") if reporte.fecha_emision else "N/A",
             "muestra": muestra,
             "fecha_toma": _format_report_date(muestra.get("fecha_toma")),
+            "logo_global": logo_global,
             "trend_charts": trend_charts,
         }
 
@@ -2078,7 +2188,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                         os.path.join(report_templates_dir, media_path.removeprefix("templates/")),
                     ])
 
-                # globalreport.html usa recursos relativos (./logo-globaloil.jpg, etc.).
+                # globalreport.html usa recursos relativos para su identidad visual.
                 candidates.extend([
                     os.path.join(report_templates_dir, path),
                     os.path.join(media_root, path),
