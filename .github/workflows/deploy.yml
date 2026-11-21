@@ -2,12 +2,9 @@ name: Backend Deploy
 
 on:
   workflow_run:
-    workflows:
-      - Backend CI
-    types:
-      - completed
-    branches:
-      - master
+    workflows: [Backend CI]
+    types: [completed]
+    branches: [master]
 
 concurrency:
   group: backend-production
@@ -16,27 +13,12 @@ concurrency:
 jobs:
   deploy:
     name: deploy-production
-    if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.event == 'push'
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
     runs-on: ubuntu-latest
     environment: production
 
     steps:
-      - name: Connect to Tailscale
-        uses: tailscale/github-action@v4
-        with:
-          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
-          tags: tag:ci
-          ping: 100.120.11.53
-
-      - name: Verify SSH connectivity
-        run: |
-          timeout 30 bash -c 'echo > /dev/tcp/100.120.11.53/22'
-          echo "SSH de Fedora accesible"
-
-      - name: Deploy backend to this server
+      - name: Deploy backend over direct SSH
         uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.SSH_HOST }}
@@ -44,17 +26,34 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: ${{ secrets.SSH_PORT }}
           script: |
-            set -eu
-            cd /home/luismolina/servidor/apps/globaloil/backend
+            set -euo pipefail
+
+            container_id="$(docker ps -q --filter 'name=^/backend$')"
+            test -n "$container_id"
+
+            project_dir="$(docker inspect "$container_id" --format '{{ index .Config.Labels "com.docker.compose.project.working_dir" }}')"
+            project_name="$(docker inspect "$container_id" --format '{{ index .Config.Labels "com.docker.compose.project" }}')"
+            config_files="$(docker inspect "$container_id" --format '{{ index .Config.Labels "com.docker.compose.project.config_files" }}')"
+            test -n "$project_dir"
+            test -n "$project_name"
+            test -n "$config_files"
+
+            cd "$project_dir"
             git fetch origin master
             git switch master
-            git pull --ff-only origin master
+            git reset --hard origin/master
 
-            docker compose -p globaloil-home -f docker-compose.prod.yml -f docker-compose.home.yml up -d --build --force-recreate web daphne
+            compose=(docker compose -p "$project_name")
+            IFS=',' read -r -a files <<< "$config_files"
+            for file in "${files[@]}"; do
+              compose+=(-f "$file")
+            done
+
+            "${compose[@]}" up -d --build --force-recreate web daphne
 
             healthy=""
             for attempt in $(seq 1 20); do
-              if docker compose -p globaloil-home -f docker-compose.prod.yml -f docker-compose.home.yml exec -T web python -c "import urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/api/health/', headers={'Host':'globaloil.luismolinatest.com','X-Forwarded-Proto':'https'}); r=urllib.request.urlopen(req, timeout=5); print(r.read().decode()); assert r.status == 200"; then
+              if docker exec backend python -c "import urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/api/health/', headers={'Host':'muestraslubricantesglobal.com','X-Forwarded-Proto':'https'}); response=urllib.request.urlopen(req, timeout=5); print(response.read().decode()); assert response.status == 200"; then
                 healthy="yes"
                 break
               fi
@@ -64,9 +63,10 @@ jobs:
 
             if [ -z "$healthy" ]; then
               echo "La comprobación de salud del backend falló."
-              docker compose -p globaloil-home -f docker-compose.prod.yml -f docker-compose.home.yml logs --tail=100 web
+              docker logs --tail=100 backend
               exit 1
             fi
 
-            docker compose -p globaloil-home -f docker-compose.prod.yml -f docker-compose.home.yml ps web daphne
-            docker compose -p globaloil-home -f docker-compose.prod.yml -f docker-compose.home.yml logs --tail=50 web daphne || true
+            "${compose[@]}" ps web daphne
+            docker logs --tail=50 backend
+            docker logs --tail=50 daphne
