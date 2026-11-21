@@ -24,7 +24,7 @@ def patch(api, path, payload):
         "patch",
         path,
         json=payload,
-        headers={"X-CSRFToken": token or "", "Referer": api.base_url},
+        headers={"X-CSRFToken": token or "", "Referer": api.referer_url},
     )
     if not response.ok:
         raise RuntimeError(f"API PATCH {path} ({response.status_code}): {response.text}")

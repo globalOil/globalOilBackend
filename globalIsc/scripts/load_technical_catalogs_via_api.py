@@ -95,7 +95,7 @@ def one_by_code(api, path, code, relation=None):
 
 def patch(api, path, payload):
     token = api.session.cookies.get("csrftoken")
-    response = api._request("patch", path, json=payload, headers={"X-CSRFToken": token or "", "Referer": api.base_url})
+    response = api._request("patch", path, json=payload, headers={"X-CSRFToken": token or "", "Referer": api.referer_url})
     if not response.ok:
         raise RuntimeError(f"API PATCH {path} ({response.status_code}): {response.text}")
     return response.json()

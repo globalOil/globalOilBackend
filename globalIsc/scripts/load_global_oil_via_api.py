@@ -17,12 +17,16 @@ class Api:
         # public host, so permit the runner to keep that Host header without
         # routing a request back through the public load balancer.
         host_header = os.environ.get("GO_API_HOST_HEADER", "").strip()
+        self.referer_url = self.base_url
         if host_header:
-            self.session.headers.update({"Host": host_header})
+            # The transport stays inside Docker but Django must see the same
+            # trusted origin and secure-proxy headers it receives from Nginx.
+            self.session.headers.update({"Host": host_header, "X-Forwarded-Proto": "https"})
+            self.referer_url = f"https://{host_header}"
         csrf = self._request("get", "/users/csrf/")
         csrf.raise_for_status()
         token = self.session.cookies.get("csrftoken")
-        response = self._request("post", "/users/login/", json={"email": email, "password": password}, headers={"X-CSRFToken": token or "", "Referer": self.base_url})
+        response = self._request("post", "/users/login/", json={"email": email, "password": password}, headers={"X-CSRFToken": token or "", "Referer": self.referer_url})
         response.raise_for_status()
     def _request(self, method, path, **kwargs):
         """Retry transient local API/Redis failures without duplicating writes."""
@@ -40,7 +44,7 @@ class Api:
         raise RuntimeError(f"API {method.upper()} {path} no respondió tras reintentos: {last_error}")
     def post(self, path, payload):
         token = self.session.cookies.get("csrftoken")
-        response = self._request("post", path, json=payload, headers={"X-CSRFToken": token or "", "Referer": self.base_url})
+        response = self._request("post", path, json=payload, headers={"X-CSRFToken": token or "", "Referer": self.referer_url})
         if not response.ok:
             raise RuntimeError(f"API POST {path} ({response.status_code}): {response.text}")
         return response.json()
@@ -49,7 +53,7 @@ class Api:
         response = self._request(
             "post", path,
             files={field_name: (file_name, content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-            headers={"X-CSRFToken": token or "", "Referer": self.base_url},
+            headers={"X-CSRFToken": token or "", "Referer": self.referer_url},
         )
         if not response.ok:
             raise RuntimeError(f"API POST {path} ({response.status_code}): {response.text}")

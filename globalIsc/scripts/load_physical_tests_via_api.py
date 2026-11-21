@@ -59,7 +59,7 @@ def main():
         if code not in existing: created.append(api.post("lubrication/tests/", definition).get("id"))
         elif code == "NIVEL_CONTAMINACION" and args.rebuild_iso4406:
             token = api.session.cookies.get("csrftoken")
-            response = api._request("patch", f"lubrication/tests/{existing[code]['id']}/", json=definition, headers={"X-CSRFToken": token or "", "Referer": api.base_url})
+            response = api._request("patch", f"lubrication/tests/{existing[code]['id']}/", json=definition, headers={"X-CSRFToken": token or "", "Referer": api.referer_url})
             if not response.ok: raise RuntimeError(f"No se pudo reconstruir ISO 4406: {response.status_code} {response.text}")
             created.append(existing[code]["id"])
         else: preserved.append(code)
