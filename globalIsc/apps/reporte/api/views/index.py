@@ -1065,18 +1065,29 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
         if not muestra_id:
             return Response({"detail": "Debe enviar la muestra."}, status=status.HTTP_400_BAD_REQUEST)
 
-        muestra = self._tenant_samples_queryset().filter(pk=muestra_id).first()
-        if not muestra:
-            return Response({"detail": "Muestra no encontrada."}, status=status.HTTP_404_NOT_FOUND)
-        if muestra.estado_operativo != "activa":
-            return Response({"detail": "No puede generar un reporte para una muestra invalidada."}, status=status.HTTP_409_CONFLICT)
-        if not muestra.is_revisado:
-            return Response({"detail": "No puede generar reporte: la muestra aun no esta revisada."}, status=status.HTTP_400_BAD_REQUEST)
-        if not _has_interpretation(muestra):
-            return Response({"detail": "No puede generar reporte: primero guarde una interpretación válida de la muestra."}, status=status.HTTP_400_BAD_REQUEST)
+        # A report may be generated from this screen while a batch generation
+        # is still finishing.  Lock the sample row, just as the batch flow
+        # does, so both paths serialize the next version calculation instead
+        # of trying to insert the same (muestra, version) pair.
+        with transaction.atomic():
+            muestra = (
+                self._tenant_samples_queryset()
+                .select_related(None)
+                .select_for_update(of=("self",))
+                .filter(pk=muestra_id)
+                .first()
+            )
+            if not muestra:
+                return Response({"detail": "Muestra no encontrada."}, status=status.HTTP_404_NOT_FOUND)
+            if muestra.estado_operativo != "activa":
+                return Response({"detail": "No puede generar un reporte para una muestra invalidada."}, status=status.HTTP_409_CONFLICT)
+            if not muestra.is_revisado:
+                return Response({"detail": "No puede generar reporte: la muestra aun no esta revisada."}, status=status.HTTP_400_BAD_REQUEST)
+            if not _has_interpretation(muestra):
+                return Response({"detail": "No puede generar reporte: primero guarde una interpretación válida de la muestra."}, status=status.HTTP_400_BAD_REQUEST)
 
-        reporte = self._create_from_interpretation(muestra, request)
-        _mark_lote_reported_if_ready(muestra.lote)
+            reporte = self._create_from_interpretation(muestra, request)
+            _mark_lote_reported_if_ready(muestra.lote)
         audit_user_action(request, "report.generated", metadata={"report_id": reporte.pk, "sample_id": muestra.pk})
         record_operational_event(
             actor=request.user,
@@ -2112,6 +2123,7 @@ class ReporteViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
                 "logo_global": logo_global,
                 "logo_report": logo_report,
                 "firma_url": firma_src,
+                "firma_historica_no_verificada": firma_path.startswith("firmas_usuarios/historicas/") if firma_url else False,
             },
             "muestra_info": muestra,
             "equipo_info": equipo,

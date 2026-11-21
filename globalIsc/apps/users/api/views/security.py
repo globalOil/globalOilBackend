@@ -423,6 +423,10 @@ class UserSecurityViewSet(GlobalOrPermissionMixin, viewsets.GenericViewSet):
             return queryset
         return queryset.filter(empresa=user.empresa)
 
+    @staticmethod
+    def _is_historical_traceability_account(target):
+        return str(target.block_reason or "").startswith("Cuenta histórica de trazabilidad")
+
     @action(detail=True, methods=["post"], url_path="block")
     def block(self, request, pk=None):
         self.check_security_permission("usuarios.bloquear")
@@ -452,6 +456,8 @@ class UserSecurityViewSet(GlobalOrPermissionMixin, viewsets.GenericViewSet):
     def unblock(self, request, pk=None):
         self.check_security_permission("usuarios.desbloquear")
         target = self.get_object()
+        if self._is_historical_traceability_account(target):
+            return Response({"detail": "Las cuentas históricas son solo trazabilidad y no se pueden habilitar desde Seguridad."}, status=status.HTTP_400_BAD_REQUEST)
         if target.block_scope == User.BlockScope.GLOBAL and not self._is_global():
             return Response({"detail": "Solo DATAIA Oil Lab puede desbloquear un bloqueo global."}, status=status.HTTP_403_FORBIDDEN)
         target.is_active = True
@@ -527,6 +533,8 @@ class UserSecurityViewSet(GlobalOrPermissionMixin, viewsets.GenericViewSet):
     def reactivate(self, request, pk=None):
         self.check_security_permission("usuarios.desbloquear")
         target = self.get_object()
+        if self._is_historical_traceability_account(target):
+            return Response({"detail": "Las cuentas históricas son solo trazabilidad y no se pueden habilitar desde Seguridad."}, status=status.HTTP_400_BAD_REQUEST)
         if target.empresa_id is None:
             return Response({"detail": "Asigne una empresa antes de reactivar este usuario."}, status=status.HTTP_400_BAD_REQUEST)
         target.is_active = True

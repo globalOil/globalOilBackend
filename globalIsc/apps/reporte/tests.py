@@ -210,6 +210,27 @@ class ReportEmailTests(TestCase):
         generated = Reporte.objects.get(pk=response.data["id"])
         self.assertEqual(generated.firma_ruta, "firmas_usuarios/firma-admin.png")
 
+    def test_generating_again_advances_the_same_sample_version(self):
+        """A new report is a new version, never a duplicate-key error."""
+        self.user.is_superuser = True
+        self.user.is_active = True
+        self.user.save(update_fields=["is_superuser", "is_active"])
+        self.sample.is_revisado = True
+        self.sample.campos_adicionales = {"interpretacion": {"conclusion": "Muestra evaluada."}}
+        self.sample.save(update_fields=["is_revisado", "campos_adicionales"])
+        view = ReporteViewSet.as_view({"post": "generate_from_interpretation"})
+
+        for expected_version in (2, 3):
+            request = APIRequestFactory().post(
+                "/api/lubrication/reports/generate-from-interpretation/",
+                {"muestra": self.sample.id},
+                format="json",
+            )
+            force_authenticate(request, user=self.user)
+            response = view(request)
+            self.assertEqual(response.status_code, 201, response.data)
+            self.assertEqual(response.data["version"], expected_version)
+
     def test_generate_batch_from_interpretation_creates_one_report_per_sample(self):
         self.user.is_superuser = True
         self.user.is_active = True

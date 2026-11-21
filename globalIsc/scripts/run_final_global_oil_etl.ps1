@@ -30,6 +30,25 @@ $projectRoot = Split-Path -Parent $scriptRoot
 $backendRoot = Split-Path -Parent $projectRoot
 $artifacts = "outputs\migracion_historica_global_oil"
 $linuxArtifacts = $artifacts -replace '\\', '/'
+$localReportes = @(
+    (Join-Path $scriptRoot "REGISTRO OA.xlsx"),
+    (Join-Path $scriptRoot "REPORTES 2026 CORTO 20 SEPTIMBRE.xlsx")
+)
+$localConocimiento = Join-Path $scriptRoot "Base_Conocimiento_Aceites_v9.xlsx"
+
+# The local company environment has one fixed source set. If the invocation
+# omits either input (including a PowerShell null array entry), use these exact
+# filenames. Server deployments can still pass two valid explicit paths.
+$validRequestedReportes = @($Reportes | Where-Object {
+    -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path -LiteralPath $_ -PathType Leaf)
+})
+$legacyDownloadDefaults = @($Reportes | Where-Object { $_ -like "C:\Users\Usuario\Downloads\*" })
+if ($validRequestedReportes.Count -ne 2 -or $legacyDownloadDefaults.Count -gt 0) {
+    $Reportes = $localReportes
+}
+if ([string]::IsNullOrWhiteSpace($Conocimiento) -or -not (Test-Path -LiteralPath $Conocimiento -PathType Leaf)) {
+    $Conocimiento = $localConocimiento
+}
 # Windows can expose a Microsoft Store ``python.exe`` alias that exists but
 # cannot execute Python. Prefer the known local Anaconda interpreter when it
 # is installed; otherwise use the PATH command.
@@ -43,6 +62,41 @@ if (-not $pythonExecutable) {
     throw "No se encontró Python. Instale Python 3 o agregue python al PATH antes de ejecutar la ETL."
 }
 
+# PowerShell can preserve a null entry when a caller builds ``@($first,
+# $missingSecond)``.  Never forward that as a bare ``--reportes`` argument.
+# The historical 2026 workbook lives beside this script in the documented
+# location, so complete that one missing input without renaming or copying it.
+$Reportes = @($Reportes | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($Reportes.Count -lt 2) {
+    # Do not depend on spacing, a hidden extension, or a copy suffix such as
+    # ``(1)``. The source workbook is identified by its business name.
+    $report2026 = Get-ChildItem -LiteralPath $scriptRoot -File -Force |
+        Where-Object {
+            $_.Extension -in ".xlsx", ".xlsm", ".xls" -and
+            $_.BaseName -match "REPORTES" -and $_.BaseName -match "2026"
+        } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
+    if ($report2026) {
+        $Reportes += $report2026
+    }
+}
+if ($Reportes.Count -lt 2) {
+    $excelesDisponibles = (Get-ChildItem -LiteralPath $scriptRoot -File -Force |
+        Where-Object { $_.Extension -in ".xlsx", ".xlsm", ".xls" } |
+        Select-Object -ExpandProperty Name) -join "; "
+    throw "Faltan reportes Excel. Excel detectados en scripts: $excelesDisponibles"
+}
+foreach ($report in $Reportes) {
+    if (-not (Test-Path -LiteralPath $report -PathType Leaf)) {
+        throw "No existe el reporte Excel: $report"
+    }
+}
+if (-not (Test-Path -LiteralPath $Conocimiento -PathType Leaf)) {
+    throw "No existe el Excel de conocimiento: $Conocimiento"
+}
+Write-Output ("Reportes fuente: " + ($Reportes -join " | "))
+
 function Invoke-EtlPython {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Arguments)
     & $pythonExecutable @Arguments
@@ -55,12 +109,27 @@ function Invoke-EtlPython {
     }
 }
 
+function Assert-LocalApiAvailable {
+    $csrfUrl = ($BaseUrl.TrimEnd("/")) + "/api/users/csrf/"
+    try {
+        $null = Invoke-WebRequest -Uri $csrfUrl -Method Get -TimeoutSec 10 -ErrorAction Stop
+    }
+    catch {
+        throw "La API local no está disponible en $BaseUrl. Inicie Docker Desktop y los contenedores backend/daphne antes de ejecutar la ETL. Detalle: $($_.Exception.Message)"
+    }
+}
+
 if ($ResetLocal -and -not $Apply) {
     throw "-ResetLocal exige -Apply. La corrida en seco nunca borra la base local."
 }
 if ($Apply -and [string]::IsNullOrWhiteSpace($Password)) {
     $securePassword = Read-Host "Contraseña del administrador local" -AsSecureString
     $Password = [System.Net.NetworkCredential]::new("", $securePassword).Password
+}
+if ($Apply) {
+    # Fail before a reset or a costly Excel transformation when Docker/API is
+    # stopped. All subsequent writes are performed through this API.
+    Assert-LocalApiAvailable
 }
 
 Push-Location $projectRoot
@@ -105,7 +174,24 @@ try {
 
     $auth = @("--apply", "--email", $Email, "--password", $Password)
     Invoke-EtlPython scripts\load_global_oil_via_api.py @common @auth
+    # A security-only reset preserves identities while company rows are
+    # rebuilt. Restore company-admin memberships deterministically as soon as
+    # the imported tenant exists again.
+    Push-Location $backendRoot
+    try {
+        docker compose -p globaloil-local --env-file .env.local -f docker-compose.prod.yml -f docker-compose.local.yml exec -T web python manage.py restore_company_admin_memberships
+        if ($LASTEXITCODE -ne 0) { throw "Falló la restauración de administradores de empresa." }
+        # The security reset preserves identities but not their passwords.
+        # Every active local account receives the password entered for this
+        # ETL, and domain-matched company accounts regain their profile.
+        docker compose -p globaloil-local --env-file .env.local -f docker-compose.prod.yml -f docker-compose.local.yml exec -T -e "ETL_ACCOUNT_PASSWORD=$Password" web python manage.py synchronize_import_accounts --password-env ETL_ACCOUNT_PASSWORD
+        if ($LASTEXITCODE -ne 0) { throw "Falló la sincronización de cuentas locales." }
+    } finally { Pop-Location }
     Invoke-EtlPython scripts\load_technical_catalogs_via_api.py @common @auth
+    # The source files do not identify a management type. Keep historic
+    # batches unassigned, while making the three agreed catalog options
+    # available for future operational lots.
+    Invoke-EtlPython scripts\ensure_historical_management_types_via_api.py --base-url $BaseUrl --email $Email --password $Password
     Invoke-EtlPython scripts\load_compound_tests_via_api.py --base-url $BaseUrl @auth
     Invoke-EtlPython scripts\load_physical_tests_via_api.py --base-url $BaseUrl @auth
     Invoke-EtlPython scripts\configure_iso4406_limits_via_api.py @common @auth
@@ -128,7 +214,7 @@ try {
     $previousPhysicalPassword = $env:DATAIA_IMPORT_PASSWORD
     try {
         $env:DATAIA_IMPORT_PASSWORD = $Password
-        Invoke-EtlPython scripts\run_physical_api_shards.py --password-env DATAIA_IMPORT_PASSWORD
+        Invoke-EtlPython scripts\run_physical_api_shards.py --password-env DATAIA_IMPORT_PASSWORD --base-url $BaseUrl
     }
     finally {
         if ($null -eq $previousPhysicalPassword) {

@@ -596,6 +596,9 @@
         <div class="responsible-name">{{ responsable }}</div>
         {% if reporte_info.firma_url %}
           <img class="signature" src="{{ reporte_info.firma_url }}">
+          {% if reporte_info.firma_historica_no_verificada %}
+            <div style="font-size: 6.5pt; color: #666; margin-top: 2px;">Marca histórica no verificada</div>
+          {% endif %}
         {% endif %}
       </td>
     </tr>

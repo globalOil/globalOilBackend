@@ -1588,6 +1588,21 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
             queryset, self.request.user, "prueba_muestra__muestra__lote__cliente_empresa_id"
         )
 
+    def _global_interpretation_only(self):
+        """Interpretation contains Global's internal technical workflow.
+
+        Company users may consult their reports and historical trends, but
+        they must never obtain the underlying interpretation payload through a
+        direct URL or API request.
+        """
+        user = self.request.user
+        if user.is_superuser or user.role == User.Role.GLOBAL:
+            return None
+        return Response(
+            {"detail": "La interpretación técnica solo está disponible para usuarios de Global."},
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
     def _scope_lotes(self, queryset=None):
         queryset = queryset or LoteMuestras.objects.all()
         return scope_queryset(queryset, self.request.user, "cliente_empresa_id")
@@ -3302,6 +3317,9 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def interpretation_batch_detail(self, request, lote_id=None):
+        denied = self._global_interpretation_only()
+        if denied:
+            return denied
         lote_id = lote_id or request.query_params.get("lote")
         lote = get_object_or_404(
             self._scope_lotes(LoteMuestras.objects.select_related("cliente_empresa", "tipo_gestion").prefetch_related("muestras")),
@@ -3311,6 +3329,9 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def interpretation_sample(self, request, muestra_id=None):
+        denied = self._global_interpretation_only()
+        if denied:
+            return denied
         from apps.muestras.api.models.muestras.index import Muestra
         muestra = get_object_or_404(
             self._scope_samples(
@@ -3423,12 +3444,18 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def interpretation_versions(self, request, muestra_id=None):
+        denied = self._global_interpretation_only()
+        if denied:
+            return denied
         muestra = get_object_or_404(self._scope_samples(Muestra.objects), pk=muestra_id)
         versions = VersionInterpretacion.objects.filter(muestra=muestra).select_related("creado_por")
         return Response(VersionInterpretacionSerializer(versions, many=True).data)
 
     @action(detail=False, methods=["patch", "post"])
     def save_interpretation_sample(self, request, muestra_id=None):
+        denied = self._global_interpretation_only()
+        if denied:
+            return denied
         from apps.muestras.api.models.muestras.index import Muestra
         muestra = get_object_or_404(self._scope_samples(Muestra.objects), pk=muestra_id)
         reason = str(request.data.get("motivo") or "").strip()
@@ -3493,6 +3520,9 @@ class ResultadoViewSet(ActionPermissionMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def interpretation_trends(self, request, muestra_id=None):
+        denied = self._global_interpretation_only()
+        if denied:
+            return denied
         from apps.muestras.api.models.muestras.index import Muestra
         from apps.activesTree.api.models.index import AsignacionPuntoMuestreo
 
