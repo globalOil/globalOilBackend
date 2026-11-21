@@ -3,6 +3,7 @@
 import argparse
 import csv
 import json
+import os
 import time
 from pathlib import Path
 import requests
@@ -11,6 +12,13 @@ import requests
 class Api:
     def __init__(self, base_url, email, password):
         self.session = requests.Session(); self.base_url = base_url.rstrip("/")
+        # Production containers call the API through Docker's internal DNS
+        # (for example ``http://backend:8000``).  Django still validates the
+        # public host, so permit the runner to keep that Host header without
+        # routing a request back through the public load balancer.
+        host_header = os.environ.get("GO_API_HOST_HEADER", "").strip()
+        if host_header:
+            self.session.headers.update({"Host": host_header})
         csrf = self._request("get", "/users/csrf/")
         csrf.raise_for_status()
         token = self.session.cookies.get("csrftoken")
