@@ -17,6 +17,7 @@ class Api:
         # public host, so permit the runner to keep that Host header without
         # routing a request back through the public load balancer.
         host_header = os.environ.get("GO_API_HOST_HEADER", "").strip()
+        self.internal_cookie_transport = bool(host_header)
         self.referer_url = self.base_url
         if host_header:
             # The transport stays inside Docker but Django must see the same
@@ -31,6 +32,19 @@ class Api:
     def _request(self, method, path, **kwargs):
         """Retry transient local API/Redis failures without duplicating writes."""
         url = f"{self.base_url}/api/{path.lstrip('/')}"
+        # Production cookies are Secure.  The ETL's explicit internal mode
+        # uses Docker's private HTTP network, where requests correctly withholds
+        # Secure cookies. Forward those cookies only for that opt-in mode so
+        # the public browser flow remains unchanged.
+        if self.internal_cookie_transport:
+            headers = dict(kwargs.pop("headers", {}) or {})
+            cookie_value = "; ".join(
+                f"{cookie.name}={cookie.value}"
+                for cookie in self.session.cookies
+            )
+            if cookie_value:
+                headers["Cookie"] = cookie_value
+            kwargs["headers"] = headers
         last_error = None
         for attempt in range(5):
             try:
