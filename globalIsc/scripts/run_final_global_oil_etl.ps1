@@ -214,7 +214,7 @@ try {
     $previousPhysicalPassword = $env:DATAIA_IMPORT_PASSWORD
     try {
         $env:DATAIA_IMPORT_PASSWORD = $Password
-        Invoke-EtlPython scripts\run_physical_api_shards.py --password-env DATAIA_IMPORT_PASSWORD --base-url $BaseUrl
+        Invoke-EtlPython scripts\run_physical_api_shards.py --password-env DATAIA_IMPORT_PASSWORD --base-url $BaseUrl --email $Email
     }
     finally {
         if ($null -eq $previousPhysicalPassword) {

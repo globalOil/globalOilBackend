@@ -72,7 +72,10 @@ run scripts/report_machine_history.py --artifacts "$ARTIFACTS"
 run scripts/audit_com_legacy_rules.py --artifacts "$ARTIFACTS"
 
 run scripts/load_global_oil_via_api.py "${COMMON[@]}" "${AUTH[@]}"
+python manage.py restore_company_admin_memberships
+ETL_ACCOUNT_PASSWORD="$PASSWORD" python manage.py synchronize_import_accounts --password-env ETL_ACCOUNT_PASSWORD
 run scripts/load_technical_catalogs_via_api.py "${COMMON[@]}" "${AUTH[@]}"
+run scripts/ensure_historical_management_types_via_api.py --base-url "$BASE_URL" --email "$EMAIL" --password "$PASSWORD"
 run scripts/load_compound_tests_via_api.py --base-url "$BASE_URL" "${AUTH[@]}"
 run scripts/load_physical_tests_via_api.py --base-url "$BASE_URL" "${AUTH[@]}"
 run scripts/configure_iso4406_limits_via_api.py "${COMMON[@]}" "${AUTH[@]}"
@@ -93,7 +96,7 @@ run scripts/invalidate_nondetect_compound_results_via_api.py "${COMMON[@]}" "${A
 run scripts/assign_physical_tests_via_api.py "${COMMON[@]}" "${AUTH[@]}"
 
 export DATAIA_IMPORT_PASSWORD="$PASSWORD"
-run scripts/run_physical_api_shards.py --password-env DATAIA_IMPORT_PASSWORD
+run scripts/run_physical_api_shards.py --password-env DATAIA_IMPORT_PASSWORD --base-url "$BASE_URL" --email "$EMAIL"
 unset DATAIA_IMPORT_PASSWORD
 
 run scripts/advance_historical_reports_via_api.py "${COMMON[@]}" "${AUTH[@]}" --resume

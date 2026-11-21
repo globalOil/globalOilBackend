@@ -24,6 +24,11 @@ def main():
         default="http://localhost:8000",
         help="URL de la API local; debe coincidir con la usada por la ETL principal.",
     )
+    parser.add_argument(
+        "--email",
+        default="admin@globaloil.local",
+        help="Correo del administrador usado por toda la ETL.",
+    )
     args = parser.parse_args()
 
     password = os.environ.get(args.password_env) or getpass.getpass("Contraseña del administrador local: ")
@@ -42,7 +47,7 @@ def main():
             "--payload-file", "api_result_payloads_physical.jsonl",
             "--report-file", f"carga_api_resultados_fisicos_forms_shard{shard}.json",
             "--base-url", args.base_url,
-            "--email", "admin@globaloil.local",
+            "--email", args.email,
             "--password-env", args.password_env,
             "--apply", "--resume",
             "--batch-shard-count", "4", "--batch-shard-index", str(shard),

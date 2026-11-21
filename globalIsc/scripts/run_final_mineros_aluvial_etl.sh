@@ -100,7 +100,11 @@ echo
 [[ -n "$PASSWORD" ]] || die "No se recibió contraseña."
 AUTH=(--apply --email "$EMAIL" --password "$PASSWORD")
 "$PYTHON" scripts/load_global_oil_via_api.py "${COMMON[@]}" "${AUTH[@]}"
+cd "$PROJECT_DIR"
+HISTORICAL_ACCOUNT_PASSWORD="$PASSWORD" "$PYTHON" manage.py restore_company_admin_memberships
+ETL_ACCOUNT_PASSWORD="$PASSWORD" "$PYTHON" manage.py synchronize_import_accounts --password-env ETL_ACCOUNT_PASSWORD
 "$PYTHON" scripts/load_technical_catalogs_via_api.py "${COMMON[@]}" "${AUTH[@]}"
+"$PYTHON" scripts/ensure_historical_management_types_via_api.py --base-url "$BASE_URL" --email "$EMAIL" --password "$PASSWORD"
 "$PYTHON" scripts/load_compound_tests_via_api.py --base-url "$BASE_URL" "${AUTH[@]}"
 "$PYTHON" scripts/load_physical_tests_via_api.py --base-url "$BASE_URL" "${AUTH[@]}"
 for script in configure_iso4406_limits_via_api.py configure_element_limits_via_api.py configure_degradation_limits_via_api.py configure_viscosity_limits_via_api.py configure_viscosity_40c_limits_via_api.py configure_viscosity_index_limits_via_api.py configure_flash_point_limits_via_api.py configure_foam_limits_via_api.py verify_limit_configuration_via_api.py load_historic_samples_via_api.py repair_historic_sample_dates_via_api.py advance_compound_workflow_via_api.py; do
@@ -109,8 +113,9 @@ done
 "$PYTHON" scripts/submit_compound_results_via_api.py "${COMMON[@]}" "${AUTH[@]}" --sample-test-map "$ARTIFACTS/staging/oa_pruebas_muestra.json"
 "$PYTHON" scripts/invalidate_nondetect_compound_results_via_api.py "${COMMON[@]}" "${AUTH[@]}"
 "$PYTHON" scripts/assign_physical_tests_via_api.py "${COMMON[@]}" "${AUTH[@]}"
-"$PYTHON" scripts/run_physical_api_shards.py --artifacts "$ARTIFACTS" --base-url "$BASE_URL" --email "$EMAIL"
+DATAIA_IMPORT_PASSWORD="$PASSWORD" "$PYTHON" scripts/run_physical_api_shards.py --base-url "$BASE_URL" --email "$EMAIL" --password-env DATAIA_IMPORT_PASSWORD
 "$PYTHON" scripts/advance_historical_reports_via_api.py "${COMMON[@]}" "${AUTH[@]}" --resume
+HISTORICAL_ACCOUNT_PASSWORD="$PASSWORD" "$PYTHON" manage.py restore_historical_responsibles --artifacts "$ARTIFACTS"
 
 if [[ "$SKIP_FINAL_VERIFICATION" == false ]]; then
   cd "$BACKEND_DIR"
