@@ -172,6 +172,14 @@ try {
         return
     }
 
+    # The API authentication account must exist before the first API write.
+    # This makes a clean database import reproducible, including its initial
+    # Global Oil and Mineros accounts, with the same password used by the ETL.
+    Push-Location $backendRoot
+    try {
+        docker compose -p globaloil-local --env-file .env.local -f docker-compose.prod.yml -f docker-compose.local.yml exec -T -e "ETL_BOOTSTRAP_PASSWORD=$Password" web python manage.py bootstrap_globaloil_etl_accounts --password-env ETL_BOOTSTRAP_PASSWORD --reset-passwords
+        if ($LASTEXITCODE -ne 0) { throw "Falló la creación de las cuentas iniciales de la ETL." }
+    } finally { Pop-Location }
     $auth = @("--apply", "--email", $Email, "--password", $Password)
     Invoke-EtlPython scripts\load_global_oil_via_api.py @common @auth
     # A security-only reset preserves identities while company rows are

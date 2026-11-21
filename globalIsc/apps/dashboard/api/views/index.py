@@ -15,9 +15,9 @@ class OperationalCenterViewSet(ActionPermissionMixin, viewsets.ViewSet):
 
     def list(self, request):
         # El centro operativo consolida datos de toda la operación. No basta
-        # con ocultar el enlace: solo DATAIA Oil Lab puede consultar este endpoint.
+        # con ocultar el enlace: solo Global Oil puede consultar este endpoint.
         if not (request.user.is_superuser or request.user.role == User.Role.GLOBAL):
-            raise PermissionDenied("El Dashboard operativo está disponible solo para DATAIA Oil Lab.")
+            raise PermissionDenied("El Dashboard operativo está disponible solo para Global Oil.")
         cached_payload, version = get_operational_center(request)
         if cached_payload is not None:
             return Response(cached_payload)

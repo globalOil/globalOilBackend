@@ -99,6 +99,7 @@ read -r -s -p "Contraseña de $EMAIL: " PASSWORD
 echo
 [[ -n "$PASSWORD" ]] || die "No se recibió contraseña."
 AUTH=(--apply --email "$EMAIL" --password "$PASSWORD")
+ETL_BOOTSTRAP_PASSWORD="$PASSWORD" "$PYTHON" manage.py bootstrap_globaloil_etl_accounts --password-env ETL_BOOTSTRAP_PASSWORD --reset-passwords
 "$PYTHON" scripts/load_global_oil_via_api.py "${COMMON[@]}" "${AUTH[@]}"
 cd "$PROJECT_DIR"
 HISTORICAL_ACCOUNT_PASSWORD="$PASSWORD" "$PYTHON" manage.py restore_company_admin_memberships

@@ -71,6 +71,7 @@ run scripts/build_physical_result_payloads.py --artifacts "$ARTIFACTS"
 run scripts/report_machine_history.py --artifacts "$ARTIFACTS"
 run scripts/audit_com_legacy_rules.py --artifacts "$ARTIFACTS"
 
+ETL_BOOTSTRAP_PASSWORD="$PASSWORD" python manage.py bootstrap_globaloil_etl_accounts --password-env ETL_BOOTSTRAP_PASSWORD --reset-passwords
 run scripts/load_global_oil_via_api.py "${COMMON[@]}" "${AUTH[@]}"
 python manage.py restore_company_admin_memberships
 ETL_ACCOUNT_PASSWORD="$PASSWORD" python manage.py synchronize_import_accounts --password-env ETL_ACCOUNT_PASSWORD
